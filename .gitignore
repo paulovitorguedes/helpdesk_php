@@ -1,0 +1,27 @@
+# Arquivos de ambiente/configuração local
+.env
+.env.local
+
+# Logs
+*.log
+
+# Backups
+*.sql
+*.zip
+*.bak
+
+# Arquivos temporários do Windows
+Thumbs.db
+Desktop.ini
+
+# IDEs
+.vscode/
+.idea/
+
+# Arquivos temporários
+tmp/
+temp/
+
+# Backups e logs gerados pelo sistema
+storage/backups/
+storage/logs/
