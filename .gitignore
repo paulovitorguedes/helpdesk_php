@@ -1,4 +1,4 @@
-# Arquivos de ambiente/configuração local
+# Variáveis de ambiente
 .env
 .env.local
 
@@ -6,19 +6,22 @@
 *.log
 
 # Backups
-*.sql
-*.zip
 *.bak
+*.zip
+
+# Backups SQL
+backup*.sql
+*_backup.sql
 
 # Arquivos temporários do Windows
 Thumbs.db
 Desktop.ini
 
-# IDEs
+# Configurações locais de IDE
 .vscode/
 .idea/
 
-# Arquivos temporários
+# Diretórios temporários
 tmp/
 temp/
 
