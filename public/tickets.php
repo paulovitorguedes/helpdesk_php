@@ -486,6 +486,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     /*
     |--------------------------------------------------------------------------
+    | VALIDAR COBRANÇA DO SERVIÇO
+    |--------------------------------------------------------------------------
+    |
+    | Se existe valor de serviço, a cobrança deve estar marcada.
+    |
+    */
+
+    if (
+        !$charged
+        &&
+        $amount > 0
+    ) {
+
+        flash(
+            'danger',
+            'Existe um valor de serviço informado. Para remover a cobrança, primeiro altere o Valor serviço para R$ 0,00.'
+        );
+
+
+        redirect(
+            $id
+                ? base_url(
+                    'tickets.php?edit='
+                        . $id
+                )
+                : base_url(
+                    'tickets.php'
+                )
+        );
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
     | VALIDAÇÕES
     |--------------------------------------------------------------------------
     */
@@ -586,6 +620,99 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $status = 'aberto';
     }
 
+    /*
+|--------------------------------------------------------------------------
+| BLOQUEAR MAIS DE UM CHAMADO PRESENCIAL PENDENTE
+| PARA O MESMO CLIENTE
+|--------------------------------------------------------------------------
+*/
+
+    if (
+        $type === 'presencial'
+        &&
+        $status === 'pendente'
+    ) {
+
+        if ($id) {
+
+            /*
+        |--------------------------------------------------------------------------
+        | EDIÇÃO
+        |--------------------------------------------------------------------------
+        |
+        | Ignora o próprio chamado que está sendo editado.
+        |
+        */
+
+            $stmt = $pdo->prepare("
+            SELECT
+                id,
+                ticket_number
+            FROM tickets
+            WHERE client_id = ?
+              AND service_type = 'presencial'
+              AND status = 'pendente'
+              AND deleted_at IS NULL
+              AND id <> ?
+            LIMIT 1
+        ");
+
+            $stmt->execute([
+                $client,
+                $id
+            ]);
+        } else {
+
+            /*
+        |--------------------------------------------------------------------------
+        | NOVO CHAMADO
+        |--------------------------------------------------------------------------
+        */
+
+            $stmt = $pdo->prepare("
+            SELECT
+                id,
+                ticket_number
+            FROM tickets
+            WHERE client_id = ?
+              AND service_type = 'presencial'
+              AND status = 'pendente'
+              AND deleted_at IS NULL
+            LIMIT 1
+        ");
+
+            $stmt->execute([
+                $client
+            ]);
+        }
+
+
+        $existingPendingTicket =
+            $stmt->fetch();
+
+
+        if ($existingPendingTicket) {
+
+            flash(
+                'danger',
+                'Já existe um chamado presencial pendente para este cliente. Chamado: '
+                    . $existingPendingTicket['ticket_number']
+                    . '.'
+            );
+
+
+            redirect(
+                $id
+                    ? base_url(
+                        'tickets.php?edit='
+                            . $id
+                    )
+                    : base_url(
+                        'tickets.php'
+                    )
+            );
+        }
+    }
 
     /*
     |--------------------------------------------------------------------------
@@ -2630,26 +2757,28 @@ render_header(
                                 : ''
                             ?>>
 
-
                         <label
                             class="form-check-label"
                             for="service_charged">
-
                             Houve cobrança de serviço?
-
                         </label>
 
                     </div>
 
 
-                    <div class="mb-2">
+                    <!-- VALOR DO SERVIÇO -->
+
+                    <div
+                        class="mb-2"
+                        id="serviceAmountContainer"
+                        style="<?= !empty($editTicket['service_charged'])
+                                    ? ''
+                                    : 'display:none;'
+                                ?>">
 
                         <label class="form-label">
-
                             Valor serviço
-
                         </label>
-
 
                         <input
                             class="form-control"
@@ -2657,10 +2786,15 @@ render_header(
                             min="0"
                             step="0.01"
                             name="service_amount"
+                            id="service_amount"
                             value="<?= e(
                                         $editTicket['service_amount']
                                             ?? '0'
                                     ) ?>">
+
+                        <div class="form-text">
+                            Para remover a cobrança, primeiro informe R$ 0,00.
+                        </div>
 
                     </div>
 
@@ -2960,7 +3094,7 @@ render_header(
 
         <div class="mb-3">
 
-            <div class="btn-group flex-wrap">
+            <div class="d-flex flex-wrap gap-2 ticket-status-tabs">
 
 
                 <?php
@@ -2969,7 +3103,7 @@ render_header(
 
                     '' => [
                         'Todos',
-                        'primary',
+                        'info',
                         'todos'
                     ],
 
@@ -3464,7 +3598,6 @@ render_header(
 
 <template id="materialRowTemplate">
 
-
     <div
         class="
             material-row
@@ -3474,34 +3607,23 @@ render_header(
             mb-2
         ">
 
+        <!-- MATERIAL -->
 
         <div class="mb-2">
 
             <label class="form-label">
-
                 Material
-
             </label>
-
 
             <select
                 class="form-select"
                 data-field="material_id">
 
                 <option value="">
-
                     Nenhum
-
                 </option>
 
-
-                <?php
-                foreach (
-                    $materials
-                    as $material
-                ):
-                ?>
-
+                <?php foreach ($materials as $material): ?>
 
                     <option
                         value="<?= (int)$material['id'] ?>">
@@ -3520,9 +3642,7 @@ render_header(
 
                     </option>
 
-
                 <?php endforeach; ?>
-
 
             </select>
 
@@ -3532,14 +3652,13 @@ render_header(
         <div class="row g-2">
 
 
+            <!-- QUANTIDADE -->
+
             <div class="col-5">
 
                 <label class="form-label">
-
                     Quantidade
-
                 </label>
-
 
                 <input
                     class="form-control"
@@ -3551,14 +3670,13 @@ render_header(
             </div>
 
 
+            <!-- VALOR UNITÁRIO -->
+
             <div class="col-5">
 
                 <label class="form-label">
-
                     Valor unitário
-
                 </label>
-
 
                 <input
                     class="form-control"
@@ -3569,6 +3687,8 @@ render_header(
 
             </div>
 
+
+            <!-- REMOVER -->
 
             <div
                 class="
@@ -3584,10 +3704,9 @@ render_header(
                         btn-outline-danger
                         w-100
                         remove-material
-                    ">
-
+                    "
+                    title="Remover material">
                     ×
-
                 </button>
 
             </div>
@@ -3595,9 +3714,7 @@ render_header(
 
         </div>
 
-
     </div>
-
 
 </template>
 
@@ -3788,5 +3905,123 @@ render_header(
     );
 </script>
 
+<script>
+    document.addEventListener(
+        'DOMContentLoaded',
+        function() {
+
+            const checkbox =
+                document.getElementById(
+                    'service_charged'
+                );
+
+            const amountContainer =
+                document.getElementById(
+                    'serviceAmountContainer'
+                );
+
+            const amountInput =
+                document.getElementById(
+                    'service_amount'
+                );
+
+
+            if (
+                !checkbox ||
+                !amountContainer ||
+                !amountInput
+            ) {
+                return;
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | MOSTRAR / OCULTAR VALOR DO SERVIÇO
+            |--------------------------------------------------------------------------
+            */
+
+            function updateServiceAmountVisibility() {
+
+                if (checkbox.checked) {
+
+                    amountContainer.style.display = '';
+
+                    return;
+                }
+
+
+                amountContainer.style.display = 'none';
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | ALTERAÇÃO DO CHECKBOX
+            |--------------------------------------------------------------------------
+            */
+
+            checkbox.addEventListener(
+                'change',
+                function() {
+
+                    /*
+                    |--------------------------------------------------------------------------
+                    | TENTOU DESMARCAR
+                    |--------------------------------------------------------------------------
+                    */
+
+                    if (!checkbox.checked) {
+
+                        const amount =
+                            parseFloat(
+                                amountInput.value
+                            ) || 0;
+
+
+                        /*
+                        |--------------------------------------------------------------------------
+                        | EXISTE VALOR DE SERVIÇO
+                        |--------------------------------------------------------------------------
+                        |
+                        | Não permitimos desmarcar.
+                        |
+                        */
+
+                        if (amount > 0) {
+
+                            checkbox.checked = true;
+
+                            amountContainer.style.display = '';
+
+                            amountInput.focus();
+
+
+                            alert(
+                                'Para remover a cobrança do serviço, primeiro altere o Valor serviço para R$ 0,00.'
+                            );
+
+                            return;
+                        }
+                    }
+
+
+                    updateServiceAmountVisibility();
+
+                }
+            );
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | ABRIR A PÁGINA
+            |--------------------------------------------------------------------------
+            */
+
+            updateServiceAmountVisibility();
+
+        }
+    );
+</script>
 
 <?php render_footer(); ?>
