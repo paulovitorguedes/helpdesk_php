@@ -321,6 +321,330 @@ function currentMaterialStock(
 }
 
 
+
+/*
+|--------------------------------------------------------------------------
+| TOTAL DOS MATERIAIS
+|--------------------------------------------------------------------------
+*/
+
+function materialItemsTotal(array $items): float
+{
+    $total = 0;
+
+    foreach ($items as $item) {
+        $total +=
+            (float)$item['quantity']
+            *
+            (float)$item['unit_price'];
+    }
+
+    return round($total, 2);
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| GERAR CRONOGRAMA DE PARCELAS
+|--------------------------------------------------------------------------
+|
+| Regra do ciclo financeiro:
+|
+| dia 01 até 15  -> competência do próprio mês
+| dia 16 em diante -> competência do mês seguinte
+|
+| O vencimento usa o dia configurado no cliente.
+|--------------------------------------------------------------------------
+*/
+
+function buildBillingSchedule(
+    string $occurredAt,
+    int $dueDay,
+    float $totalAmount,
+    int $installmentCount
+): array {
+
+    if ($totalAmount <= 0) {
+        return [];
+    }
+
+    if ($installmentCount < 1) {
+        $installmentCount = 1;
+    }
+
+    $dueDay = max(1, min($dueDay, 28));
+
+    $occurred =
+        new DateTimeImmutable(
+            date(
+                'Y-m-d',
+                strtotime($occurredAt)
+            )
+        );
+
+    if ((int)$occurred->format('d') >= 16) {
+        $firstMonth =
+            $occurred
+            ->modify('first day of next month');
+    } else {
+        $firstMonth =
+            $occurred
+            ->modify('first day of this month');
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | DIVIDIR EM CENTAVOS
+    |--------------------------------------------------------------------------
+    |
+    | Isso evita diferença de arredondamento.
+    | Ex.: R$ 100,00 em 3x = 33,34 + 33,33 + 33,33
+    |--------------------------------------------------------------------------
+    */
+
+    $totalCents =
+        (int)round(
+            $totalAmount * 100
+        );
+
+    $baseCents =
+        intdiv(
+            $totalCents,
+            $installmentCount
+        );
+
+    $remainder =
+        $totalCents
+        %
+        $installmentCount;
+
+    $schedule = [];
+
+    for (
+        $number = 1;
+        $number <= $installmentCount;
+        $number++
+    ) {
+
+        $month =
+            $firstMonth
+            ->modify(
+                '+'
+                    . ($number - 1)
+                    . ' month'
+            );
+
+        $dueDate =
+            $month
+            ->setDate(
+                (int)$month->format('Y'),
+                (int)$month->format('m'),
+                $dueDay
+            )
+            ->format('Y-m-d');
+
+        $cents =
+            $baseCents
+            +
+            (
+                $number <= $remainder
+                ? 1
+                : 0
+            );
+
+        $schedule[] = [
+            'installment_number' =>
+            $number,
+
+            'installment_count' =>
+            $installmentCount,
+
+            'due_date' =>
+            $dueDate,
+
+            'amount' =>
+            $cents / 100
+        ];
+    }
+
+    return $schedule;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| COMPARAR CRONOGRAMAS
+|--------------------------------------------------------------------------
+*/
+
+function billingSchedulesAreEqual(
+    array $currentRows,
+    array $newSchedule
+): bool {
+
+    if (
+        count($currentRows)
+        !==
+        count($newSchedule)
+    ) {
+        return false;
+    }
+
+    foreach (
+        $currentRows
+        as $index => $current
+    ) {
+
+        $new =
+            $newSchedule[$index]
+            ?? null;
+
+        if (!$new) {
+            return false;
+        }
+
+        if (
+            (int)$current['installment_number']
+            !==
+            (int)$new['installment_number']
+            ||
+            (int)$current['installment_count']
+            !==
+            (int)$new['installment_count']
+            ||
+            $current['due_date']
+            !==
+            $new['due_date']
+            ||
+            abs(
+                (float)$current['amount']
+                    -
+                    (float)$new['amount']
+            ) > 0.009
+        ) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| SALVAR CRONOGRAMA DE COBRANÇA
+|--------------------------------------------------------------------------
+|
+| Se alguma parcela já estiver vinculada a uma conta a receber,
+| não permitimos alterar o cronograma financeiro.
+|--------------------------------------------------------------------------
+*/
+
+function saveBillingSchedule(
+    PDO $pdo,
+    int $ticketId,
+    string $chargeType,
+    array $newSchedule
+): void {
+
+    $stmt = $pdo->prepare("
+        SELECT
+            id,
+            installment_number,
+            installment_count,
+            due_date,
+            amount,
+            receivable_id
+        FROM ticket_billing_installments
+        WHERE ticket_id = ?
+          AND charge_type = ?
+        ORDER BY installment_number
+    ");
+
+    $stmt->execute([
+        $ticketId,
+        $chargeType
+    ]);
+
+    $currentRows =
+        $stmt->fetchAll();
+
+    $hasLinkedInstallment = false;
+
+    foreach ($currentRows as $row) {
+
+        if (
+            !empty($row['receivable_id'])
+        ) {
+            $hasLinkedInstallment = true;
+            break;
+        }
+    }
+
+    if ($hasLinkedInstallment) {
+
+        if (
+            !billingSchedulesAreEqual(
+                $currentRows,
+                $newSchedule
+            )
+        ) {
+
+            throw new Exception(
+                'O parcelamento de '
+                    . (
+                        $chargeType === 'servico'
+                        ? 'serviço'
+                        : 'materiais'
+                    )
+                    . ' já possui parcela vinculada ao Contas a Receber e não pode ser alterado diretamente.'
+            );
+        }
+
+        return;
+    }
+
+    $stmt = $pdo->prepare("
+        DELETE FROM ticket_billing_installments
+        WHERE ticket_id = ?
+          AND charge_type = ?
+    ");
+
+    $stmt->execute([
+        $ticketId,
+        $chargeType
+    ]);
+
+    if (empty($newSchedule)) {
+        return;
+    }
+
+    $stmt = $pdo->prepare("
+        INSERT INTO ticket_billing_installments (
+            ticket_id,
+            charge_type,
+            installment_number,
+            installment_count,
+            due_date,
+            amount
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+    ");
+
+    foreach ($newSchedule as $installment) {
+
+        $stmt->execute([
+            $ticketId,
+            $chargeType,
+            $installment['installment_number'],
+            $installment['installment_count'],
+            $installment['due_date'],
+            $installment['amount']
+        ]);
+    }
+}
+
+
 /*
 |--------------------------------------------------------------------------
 | MODO EDITAR
@@ -329,6 +653,9 @@ function currentMaterialStock(
 
 $editTicket = null;
 $editTicketMaterials = [];
+
+$editServiceInstallments = 1;
+$editMaterialInstallments = 1;
 
 
 if (isset($_GET['edit'])) {
@@ -392,6 +719,56 @@ if (isset($_GET['edit'])) {
 
     $editTicketMaterials =
         $stmt->fetchAll();
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | PARCELAMENTO ATUAL
+    |--------------------------------------------------------------------------
+    */
+
+    $stmt = $pdo->prepare("
+        SELECT
+            charge_type,
+            MAX(installment_count) AS installment_count
+        FROM ticket_billing_installments
+        WHERE ticket_id = ?
+        GROUP BY charge_type
+    ");
+
+    $stmt->execute([
+        $editId
+    ]);
+
+    foreach (
+        $stmt->fetchAll()
+        as $billingRow
+    ) {
+
+        if (
+            $billingRow['charge_type']
+            === 'servico'
+        ) {
+
+            $editServiceInstallments =
+                max(
+                    1,
+                    (int)$billingRow['installment_count']
+                );
+        }
+
+        if (
+            $billingRow['charge_type']
+            === 'materiais'
+        ) {
+
+            $editMaterialInstallments =
+                max(
+                    1,
+                    (int)$billingRow['installment_count']
+                );
+        }
+    }
 }
 
 
@@ -462,6 +839,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
 
 
+    $serviceDescription =
+        trim(
+            $_POST['service_description']
+                ?? ''
+        );
+
+
+    $serviceBillingMode =
+        $_POST['service_billing_mode']
+        ?? 'avista';
+
+
+    $serviceInstallments =
+        (int)(
+            $_POST['service_installments']
+            ?? 1
+        );
+
+
+    $materialBillingMode =
+        $_POST['material_billing_mode']
+        ?? 'avista';
+
+
+    $materialInstallments =
+        (int)(
+            $_POST['material_installments']
+            ?? 1
+        );
+
+
     $notes =
         trim(
             $_POST['notes']
@@ -497,6 +905,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         !$charged
         &&
         $amount > 0
+        &&
+        $status !== 'cancelado'
     ) {
 
         flash(
@@ -721,7 +1131,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     */
 
     $stmt = $pdo->prepare("
-        SELECT has_contract
+        SELECT
+            has_contract,
+            due_day
         FROM clients
         WHERE id = ?
     ");
@@ -731,8 +1143,35 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     ]);
 
 
+    $clientFinancial =
+        $stmt->fetch();
+
+
+    if (!$clientFinancial) {
+
+        flash(
+            'danger',
+            'Cliente não encontrado.'
+        );
+
+        redirect(
+            base_url('tickets.php')
+        );
+    }
+
+
     $hasContract =
-        (int)$stmt->fetchColumn();
+        (int)$clientFinancial['has_contract'];
+
+
+    $clientDueDay =
+        max(
+            1,
+            min(
+                (int)$clientFinancial['due_day'],
+                28
+            )
+        );
 
 
     /*
@@ -784,6 +1223,140 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     /*
     |--------------------------------------------------------------------------
+    | REGRAS DO PARCELAMENTO DO SERVIÇO
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+        !in_array(
+            $serviceBillingMode,
+            [
+                'avista',
+                'parcelado'
+            ],
+            true
+        )
+    ) {
+
+        $serviceBillingMode =
+            'avista';
+    }
+
+
+    if (
+        $serviceBillingMode === 'avista'
+    ) {
+
+        $serviceInstallments = 1;
+    }
+
+
+    if (
+        $serviceInstallments < 1
+        ||
+        $serviceInstallments > 60
+    ) {
+
+        flash(
+            'danger',
+            'A quantidade de parcelas do serviço deve estar entre 1 e 60.'
+        );
+
+        redirect(
+            $id
+                ? base_url(
+                    'tickets.php?edit='
+                        . $id
+                )
+                : base_url(
+                    'tickets.php'
+                )
+        );
+    }
+
+
+    if (
+        $charged
+        &&
+        $amount > 0
+        &&
+        $serviceDescription === ''
+    ) {
+
+        flash(
+            'danger',
+            'Informe a descrição do serviço cobrado.'
+        );
+
+        redirect(
+            $id
+                ? base_url(
+                    'tickets.php?edit='
+                        . $id
+                )
+                : base_url(
+                    'tickets.php'
+                )
+        );
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | REGRAS DO PARCELAMENTO DOS MATERIAIS
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+        !in_array(
+            $materialBillingMode,
+            [
+                'avista',
+                'parcelado'
+            ],
+            true
+        )
+    ) {
+
+        $materialBillingMode =
+            'avista';
+    }
+
+
+    if (
+        $materialBillingMode === 'avista'
+    ) {
+
+        $materialInstallments = 1;
+    }
+
+
+    if (
+        $materialInstallments < 1
+        ||
+        $materialInstallments > 60
+    ) {
+
+        flash(
+            'danger',
+            'A quantidade de parcelas dos materiais deve estar entre 1 e 60.'
+        );
+
+        redirect(
+            $id
+                ? base_url(
+                    'tickets.php?edit='
+                        . $id
+                )
+                : base_url(
+                    'tickets.php'
+                )
+        );
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
     | MATERIAIS POSTADOS
     |--------------------------------------------------------------------------
     */
@@ -813,6 +1386,75 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'tickets.php'
                 )
         );
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | TOTAL DA VENDA DE MATERIAIS
+    |--------------------------------------------------------------------------
+    */
+
+    $newMaterialsAmount =
+        materialItemsTotal(
+            $newMaterialItems
+        );
+
+
+    if (
+        empty($newMaterialItems)
+        ||
+        $newMaterialsAmount <= 0
+    ) {
+
+        $materialBillingMode =
+            'avista';
+
+        $materialInstallments = 1;
+    }
+
+
+    /*
+    |--------------------------------------------------------------------------
+    | CRONOGRAMAS FINANCEIROS
+    |--------------------------------------------------------------------------
+    */
+
+    $serviceSchedule = [];
+
+    if (
+        $status !== 'cancelado'
+        &&
+        $charged
+        &&
+        $amount > 0
+    ) {
+
+        $serviceSchedule =
+            buildBillingSchedule(
+                $occurredAt,
+                $clientDueDay,
+                $amount,
+                $serviceInstallments
+            );
+    }
+
+
+    $materialSchedule = [];
+
+    if (
+        $status !== 'cancelado'
+        &&
+        $newMaterialsAmount > 0
+    ) {
+
+        $materialSchedule =
+            buildBillingSchedule(
+                $occurredAt,
+                $clientDueDay,
+                $newMaterialsAmount,
+                $materialInstallments
+            );
     }
 
 
@@ -984,12 +1626,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     notes,
                     status,
                     solution_text,
+                    service_description,
                     service_charged,
                     service_amount,
                     materials_sold,
                     created_by
                 )
                 VALUES (
+                    ?,
                     ?,
                     ?,
                     ?,
@@ -1018,6 +1662,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $notes,
                 $status,
                 $solutionText,
+                $serviceDescription,
                 $charged,
                 $amount,
 
@@ -1131,6 +1776,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 ]);
             }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | SALVAR PARCELAMENTO
+            |--------------------------------------------------------------------------
+            */
+
+            saveBillingSchedule(
+                $pdo,
+                $ticketId,
+                'servico',
+                $serviceSchedule
+            );
+
+
+            saveBillingSchedule(
+                $pdo,
+                $ticketId,
+                'materiais',
+                $materialSchedule
+            );
 
 
             $pdo->commit();
@@ -1512,6 +2179,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 notes = ?,
                 status = ?,
                 solution_text = ?,
+                service_description = ?,
                 service_charged = ?,
                 service_amount = ?,
                 materials_sold = ?
@@ -1536,6 +2204,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $status,
 
             $solutionText,
+
+            $serviceDescription,
 
             $charged,
 
@@ -1810,6 +2480,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         | COMMIT
         |--------------------------------------------------------------------------
         */
+
+        /*
+        |--------------------------------------------------------------------------
+        | SALVAR / ATUALIZAR PARCELAMENTO
+        |--------------------------------------------------------------------------
+        */
+
+        saveBillingSchedule(
+            $pdo,
+            $id,
+            'servico',
+            $serviceSchedule
+        );
+
+
+        saveBillingSchedule(
+            $pdo,
+            $id,
+            'materiais',
+            $materialSchedule
+        );
+
 
         $pdo->commit();
 
@@ -2766,34 +3458,127 @@ render_header(
                     </div>
 
 
-                    <!-- VALOR DO SERVIÇO -->
+                    <!-- DADOS DA COBRANÇA DO SERVIÇO -->
 
                     <div
-                        class="mb-2"
-                        id="serviceAmountContainer"
+                        id="serviceBillingContainer"
                         style="<?= !empty($editTicket['service_charged'])
                                     ? ''
                                     : 'display:none;'
                                 ?>">
 
-                        <label class="form-label">
-                            Valor serviço
-                        </label>
+                        <div class="mb-2">
 
-                        <input
-                            class="form-control"
-                            type="number"
-                            min="0"
-                            step="0.01"
-                            name="service_amount"
-                            id="service_amount"
-                            value="<?= e(
-                                        $editTicket['service_amount']
-                                            ?? '0'
-                                    ) ?>">
+                            <label class="form-label">
+                                Descrição do serviço cobrado
+                            </label>
 
-                        <div class="form-text">
-                            Para remover a cobrança, primeiro informe R$ 0,00.
+                            <input
+                                class="form-control"
+                                type="text"
+                                maxlength="255"
+                                name="service_description"
+                                id="service_description"
+                                value="<?= e(
+                                            $editTicket['service_description']
+                                                ?? ''
+                                        ) ?>">
+
+                            <div class="form-text">
+                                Esta descrição será utilizada no demonstrativo de cobrança.
+                            </div>
+
+                        </div>
+
+
+                        <div class="mb-2">
+
+                            <label class="form-label">
+                                Valor serviço
+                            </label>
+
+                            <input
+                                class="form-control"
+                                type="number"
+                                min="0"
+                                step="0.01"
+                                name="service_amount"
+                                id="service_amount"
+                                value="<?= e(
+                                            $editTicket['service_amount']
+                                                ?? '0'
+                                        ) ?>">
+
+                            <div class="form-text">
+                                Para remover a cobrança, primeiro informe R$ 0,00.
+                            </div>
+
+                        </div>
+
+
+                        <div class="row g-2 mb-2">
+
+                            <div class="col-md-6">
+
+                                <label class="form-label">
+                                    Forma de cobrança
+                                </label>
+
+                                <select
+                                    class="form-select"
+                                    name="service_billing_mode"
+                                    id="service_billing_mode">
+
+                                    <option
+                                        value="avista"
+                                        <?= $editServiceInstallments <= 1
+                                            ? 'selected'
+                                            : ''
+                                        ?>>
+                                        À vista
+                                    </option>
+
+                                    <option
+                                        value="parcelado"
+                                        <?= $editServiceInstallments > 1
+                                            ? 'selected'
+                                            : ''
+                                        ?>>
+                                        Parcelado
+                                    </option>
+
+                                </select>
+
+                            </div>
+
+
+                            <div
+                                class="col-md-6"
+                                id="serviceInstallmentsContainer"
+                                style="<?= $editServiceInstallments > 1
+                                            ? ''
+                                            : 'display:none;'
+                                        ?>">
+
+                                <label class="form-label">
+                                    Quantidade de parcelas
+                                </label>
+
+                                <input
+                                    class="form-control"
+                                    type="number"
+                                    min="2"
+                                    max="60"
+                                    step="1"
+                                    name="service_installments"
+                                    id="service_installments"
+                                    value="<?= (int)max(
+                                                2,
+                                                $editServiceInstallments
+                                            ) ?>">
+
+                            </div>
+
                         </div>
 
                     </div>
@@ -3015,6 +3800,108 @@ render_header(
 
                         <?php endforeach; ?>
 
+
+                    </div>
+
+
+                    <!-- COBRANÇA DOS MATERIAIS -->
+
+                    <div
+                        id="materialBillingContainer"
+                        class="mt-3"
+                        style="<?= !empty($editTicketMaterials)
+                                    ? ''
+                                    : 'display:none;'
+                                ?>">
+
+                        <div class="border rounded p-2">
+
+                            <div class="d-flex justify-content-between mb-2">
+
+                                <strong>
+                                    Cobrança dos materiais
+                                </strong>
+
+                                <span>
+                                    Total:
+                                    <strong id="materialsBillingTotal">
+                                        R$ 0,00
+                                    </strong>
+                                </span>
+
+                            </div>
+
+
+                            <div class="row g-2">
+
+                                <div class="col-md-6">
+
+                                    <label class="form-label">
+                                        Forma de cobrança
+                                    </label>
+
+                                    <select
+                                        class="form-select"
+                                        name="material_billing_mode"
+                                        id="material_billing_mode">
+
+                                        <option
+                                            value="avista"
+                                            <?= $editMaterialInstallments <= 1
+                                                ? 'selected'
+                                                : ''
+                                            ?>>
+                                            À vista
+                                        </option>
+
+                                        <option
+                                            value="parcelado"
+                                            <?= $editMaterialInstallments > 1
+                                                ? 'selected'
+                                                : ''
+                                            ?>>
+                                            Parcelado
+                                        </option>
+
+                                    </select>
+
+                                </div>
+
+
+                                <div
+                                    class="col-md-6"
+                                    id="materialInstallmentsContainer"
+                                    style="<?= $editMaterialInstallments > 1
+                                                ? ''
+                                                : 'display:none;'
+                                            ?>">
+
+                                    <label class="form-label">
+                                        Quantidade de parcelas
+                                    </label>
+
+                                    <input
+                                        class="form-control"
+                                        type="number"
+                                        min="2"
+                                        max="60"
+                                        step="1"
+                                        name="material_installments"
+                                        id="material_installments"
+                                        value="<?= (int)max(
+                                                    2,
+                                                    $editMaterialInstallments
+                                                ) ?>">
+
+                                </div>
+
+                            </div>
+
+                            <div class="form-text mt-2">
+                                O parcelamento é aplicado ao total dos materiais vendidos neste chamado.
+                            </div>
+
+                        </div>
 
                     </div>
 
@@ -3915,9 +4802,14 @@ render_header(
                     'service_charged'
                 );
 
-            const amountContainer =
+            const serviceBillingContainer =
                 document.getElementById(
-                    'serviceAmountContainer'
+                    'serviceBillingContainer'
+                );
+
+            const descriptionInput =
+                document.getElementById(
+                    'service_description'
                 );
 
             const amountInput =
@@ -3925,100 +4817,332 @@ render_header(
                     'service_amount'
                 );
 
+            const serviceBillingMode =
+                document.getElementById(
+                    'service_billing_mode'
+                );
 
-            if (
-                !checkbox ||
-                !amountContainer ||
-                !amountInput
-            ) {
-                return;
-            }
+            const serviceInstallmentsContainer =
+                document.getElementById(
+                    'serviceInstallmentsContainer'
+                );
+
+            const serviceInstallments =
+                document.getElementById(
+                    'service_installments'
+                );
 
 
             /*
             |--------------------------------------------------------------------------
-            | MOSTRAR / OCULTAR VALOR DO SERVIÇO
+            | COBRANÇA DO SERVIÇO
             |--------------------------------------------------------------------------
             */
 
-            function updateServiceAmountVisibility() {
+            function updateServiceVisibility() {
 
-                if (checkbox.checked) {
-
-                    amountContainer.style.display = '';
-
+                if (
+                    !checkbox ||
+                    !serviceBillingContainer
+                ) {
                     return;
                 }
 
+                serviceBillingContainer.style.display =
+                    checkbox.checked ?
+                    '' :
+                    'none';
 
-                amountContainer.style.display = 'none';
+                if (descriptionInput) {
+                    descriptionInput.required =
+                        checkbox.checked;
+                }
+
+                if (amountInput) {
+                    amountInput.required =
+                        checkbox.checked;
+                }
+            }
+
+
+            if (
+                checkbox &&
+                amountInput
+            ) {
+
+                checkbox.addEventListener(
+                    'change',
+                    function() {
+
+                        if (!checkbox.checked) {
+
+                            const amount =
+                                parseFloat(
+                                    amountInput.value
+                                ) || 0;
+
+                            if (amount > 0) {
+
+                                checkbox.checked = true;
+
+                                serviceBillingContainer.style.display = '';
+
+                                amountInput.focus();
+
+                                alert(
+                                    'Para remover a cobrança do serviço, primeiro altere o Valor serviço para R$ 0,00.'
+                                );
+
+                                return;
+                            }
+                        }
+
+                        updateServiceVisibility();
+                    }
+                );
             }
 
 
             /*
             |--------------------------------------------------------------------------
-            | ALTERAÇÃO DO CHECKBOX
+            | PARCELAMENTO DO SERVIÇO
             |--------------------------------------------------------------------------
             */
 
-            checkbox.addEventListener(
-                'change',
-                function() {
+            function updateServiceInstallments() {
 
-                    /*
-                    |--------------------------------------------------------------------------
-                    | TENTOU DESMARCAR
-                    |--------------------------------------------------------------------------
-                    */
-
-                    if (!checkbox.checked) {
-
-                        const amount =
-                            parseFloat(
-                                amountInput.value
-                            ) || 0;
-
-
-                        /*
-                        |--------------------------------------------------------------------------
-                        | EXISTE VALOR DE SERVIÇO
-                        |--------------------------------------------------------------------------
-                        |
-                        | Não permitimos desmarcar.
-                        |
-                        */
-
-                        if (amount > 0) {
-
-                            checkbox.checked = true;
-
-                            amountContainer.style.display = '';
-
-                            amountInput.focus();
-
-
-                            alert(
-                                'Para remover a cobrança do serviço, primeiro altere o Valor serviço para R$ 0,00.'
-                            );
-
-                            return;
-                        }
-                    }
-
-
-                    updateServiceAmountVisibility();
-
+                if (
+                    !serviceBillingMode ||
+                    !serviceInstallmentsContainer ||
+                    !serviceInstallments
+                ) {
+                    return;
                 }
-            );
+
+                const parcelado =
+                    serviceBillingMode.value ===
+                    'parcelado';
+
+                serviceInstallmentsContainer.style.display =
+                    parcelado ?
+                    '' :
+                    'none';
+
+                serviceInstallments.required =
+                    parcelado;
+
+                if (!parcelado) {
+                    serviceInstallments.value = '2';
+                }
+            }
+
+
+            if (serviceBillingMode) {
+
+                serviceBillingMode.addEventListener(
+                    'change',
+                    updateServiceInstallments
+                );
+            }
 
 
             /*
             |--------------------------------------------------------------------------
-            | ABRIR A PÁGINA
+            | COBRANÇA DOS MATERIAIS
             |--------------------------------------------------------------------------
             */
 
-            updateServiceAmountVisibility();
+            const materialsContainer =
+                document.getElementById(
+                    'materialsContainer'
+                );
+
+            const materialBillingContainer =
+                document.getElementById(
+                    'materialBillingContainer'
+                );
+
+            const materialsBillingTotal =
+                document.getElementById(
+                    'materialsBillingTotal'
+                );
+
+            const materialBillingMode =
+                document.getElementById(
+                    'material_billing_mode'
+                );
+
+            const materialInstallmentsContainer =
+                document.getElementById(
+                    'materialInstallmentsContainer'
+                );
+
+            const materialInstallments =
+                document.getElementById(
+                    'material_installments'
+                );
+
+
+            function formatBRL(value) {
+
+                return new Intl.NumberFormat(
+                    'pt-BR', {
+                        style: 'currency',
+                        currency: 'BRL'
+                    }
+                ).format(value);
+            }
+
+
+            function updateMaterialBilling() {
+
+                if (
+                    !materialsContainer ||
+                    !materialBillingContainer
+                ) {
+                    return;
+                }
+
+                let total = 0;
+                let hasMaterial = false;
+
+                materialsContainer
+                    .querySelectorAll(
+                        '.material-row'
+                    )
+                    .forEach(
+                        function(row) {
+
+                            const select =
+                                row.querySelector(
+                                    'select'
+                                );
+
+                            const quantity =
+                                row.querySelector(
+                                    'input[name*="[quantity]"]'
+                                );
+
+                            const unitPrice =
+                                row.querySelector(
+                                    'input[name*="[unit_price]"]'
+                                );
+
+                            if (
+                                select &&
+                                select.value
+                            ) {
+
+                                hasMaterial = true;
+
+                                const qty =
+                                    parseFloat(
+                                        quantity ?
+                                        quantity.value :
+                                        0
+                                    ) || 0;
+
+                                const price =
+                                    parseFloat(
+                                        unitPrice ?
+                                        unitPrice.value :
+                                        0
+                                    ) || 0;
+
+                                total +=
+                                    qty * price;
+                            }
+                        }
+                    );
+
+                materialBillingContainer.style.display =
+                    hasMaterial ?
+                    '' :
+                    'none';
+
+                if (materialsBillingTotal) {
+
+                    materialsBillingTotal.textContent =
+                        formatBRL(total);
+                }
+            }
+
+
+            if (materialsContainer) {
+
+                materialsContainer.addEventListener(
+                    'input',
+                    updateMaterialBilling
+                );
+
+                materialsContainer.addEventListener(
+                    'change',
+                    updateMaterialBilling
+                );
+
+                materialsContainer.addEventListener(
+                    'click',
+                    function() {
+
+                        setTimeout(
+                            updateMaterialBilling,
+                            0
+                        );
+                    }
+                );
+            }
+
+
+            function updateMaterialInstallments() {
+
+                if (
+                    !materialBillingMode ||
+                    !materialInstallmentsContainer ||
+                    !materialInstallments
+                ) {
+                    return;
+                }
+
+                const parcelado =
+                    materialBillingMode.value ===
+                    'parcelado';
+
+                materialInstallmentsContainer.style.display =
+                    parcelado ?
+                    '' :
+                    'none';
+
+                materialInstallments.required =
+                    parcelado;
+
+                if (!parcelado) {
+                    materialInstallments.value = '2';
+                }
+            }
+
+
+            if (materialBillingMode) {
+
+                materialBillingMode.addEventListener(
+                    'change',
+                    updateMaterialInstallments
+                );
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | ESTADO INICIAL
+            |--------------------------------------------------------------------------
+            */
+
+            updateServiceVisibility();
+
+            updateServiceInstallments();
+
+            updateMaterialBilling();
+
+            updateMaterialInstallments();
 
         }
     );
