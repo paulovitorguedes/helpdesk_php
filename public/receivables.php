@@ -9,6 +9,25 @@ $pdo = db();
 
 /*
 |--------------------------------------------------------------------------
+| INÍCIO DO CONTROLE FINANCEIRO
+|--------------------------------------------------------------------------
+|
+| A empresa começou a utilizar o Contas a Receber em 09/2026.
+|
+| Regra de implantação:
+| - competências anteriores NÃO carregam mensalidades antigas como pendência;
+| - na competência inicial (09/2026), somente cobranças históricas de
+|   SERVIÇOS e MATERIAIS entram como Saldo anterior;
+| - a partir das competências seguintes, o fluxo normal de saldo anterior
+|   passa a valer.
+|
+*/
+
+const FINANCIAL_START_COMPETENCE = '2026-09';
+
+
+/*
+|--------------------------------------------------------------------------
 | VALIDAR DATA
 |--------------------------------------------------------------------------
 */
@@ -113,6 +132,81 @@ function competenceFromDate(string $date): DateTimeImmutable
 
 /*
 |--------------------------------------------------------------------------
+| PRIMEIRA COMPETÊNCIA QUE PRECISA SER RECALCULADA
+|--------------------------------------------------------------------------
+|
+| Quando um chamado antigo é lançado depois, precisamos recalcular as
+| competências desde o primeiro movimento financeiro relevante até o período
+| pesquisado. Assim uma cobrança antiga passa a compor corretamente o saldo
+| anterior do mês atual.
+|
+*/
+
+function firstReceivableCompetenceToRecalculate(
+    PDO $pdo,
+    DateTimeImmutable $requestedFirstCompetence
+): DateTimeImmutable {
+
+    $candidates = [
+        $requestedFirstCompetence
+    ];
+
+
+    /*
+    | Primeira competência já existente no Contas a Receber.
+    */
+
+    $minReceivable =
+        $pdo->query("
+            SELECT MIN(competence)
+            FROM receivables
+        ")->fetchColumn();
+
+    if (
+        is_string($minReceivable)
+        &&
+        preg_match('/^\d{4}-\d{2}$/', $minReceivable)
+    ) {
+        $candidates[] =
+            new DateTimeImmutable(
+                $minReceivable . '-01'
+            );
+    }
+
+
+    /*
+    | Primeira parcela de chamado ainda existente.
+    */
+
+    $minInstallment =
+        $pdo->query("
+            SELECT MIN(due_date)
+            FROM ticket_billing_installments
+        ")->fetchColumn();
+
+    if ($minInstallment) {
+        $candidates[] =
+            (new DateTimeImmutable($minInstallment))
+            ->modify('first day of this month');
+    }
+
+
+    $first =
+        $requestedFirstCompetence;
+
+    foreach ($candidates as $candidate) {
+
+        if ($candidate < $first) {
+            $first = $candidate;
+        }
+    }
+
+    return $first;
+}
+
+
+/*
+|--------------------------------------------------------------------------
 | RECALCULAR TODOS OS CICLOS DO PERÍODO PESQUISADO
 |--------------------------------------------------------------------------
 |
@@ -135,9 +229,15 @@ function recalculateCyclesForPeriod(
     string $filterEnd
 ): void {
 
-    $firstCompetence =
+    $requestedFirstCompetence =
         competenceFromDate(
             $filterStart
+        );
+
+    $firstCompetence =
+        firstReceivableCompetenceToRecalculate(
+            $pdo,
+            $requestedFirstCompetence
         );
 
     $lastCompetence =
@@ -513,28 +613,130 @@ function recalculate_cycle(
         |--------------------------------------------------------------------------
         | SALDO ANTERIOR
         |--------------------------------------------------------------------------
+        |
+        | Há uma regra especial de implantação para 09/2026:
+        |
+        | 1) Antes de 09/2026
+        |    Não carregamos saldo anterior entre competências. Isso impede que
+        |    mensalidades antigas, anteriores ao início do uso do financeiro,
+        |    contaminem o mês de implantação.
+        |
+        | 2) Em 09/2026
+        |    O Saldo anterior considera SOMENTE cobranças históricas de
+        |    SERVIÇOS e MATERIAIS ainda pendentes. Mensalidades antigas,
+        |    visitas e demais componentes anteriores não entram.
+        |
+        | 3) Depois de 09/2026
+        |    Volta a regra normal: a última conta anterior já vencida carrega
+        |    seu saldo pendente para a competência seguinte.
+        |--------------------------------------------------------------------------
         */
 
-        $stmt = $pdo->prepare("
-            SELECT
-                GREATEST(
-                    total_amount - paid_amount,
-                    0
-                )
-            FROM receivables
-            WHERE client_id = ?
-              AND competence < ?
-            ORDER BY competence DESC
-            LIMIT 1
-        ");
+        $todayDate =
+            (new DateTimeImmutable('today'))
+            ->format('Y-m-d');
 
-        $stmt->execute([
-            $client['id'],
+
+        /*
+        |--------------------------------------------------------------------------
+        | COMPETÊNCIAS ANTERIORES AO INÍCIO FINANCEIRO
+        |--------------------------------------------------------------------------
+        */
+
+        if (
             $competence
-        ]);
+            <
+            FINANCIAL_START_COMPETENCE
+        ) {
 
-        $previous =
-            (float)($stmt->fetchColumn() ?: 0);
+            $previous = 0.0;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | COMPETÊNCIA DE IMPLANTAÇÃO
+        |--------------------------------------------------------------------------
+        |
+        | Soma apenas a parcela ainda pendente correspondente a serviços e
+        | materiais das competências anteriores.
+        |
+        | LEAST() evita considerar mensalidade antiga como parte dessa abertura.
+        |--------------------------------------------------------------------------
+        */ elseif (
+            $competence
+            ===
+            FINANCIAL_START_COMPETENCE
+        ) {
+
+            $stmt = $pdo->prepare("
+                SELECT
+                    COALESCE(
+                        SUM(
+                            LEAST(
+                                GREATEST(
+                                    services_amount
+                                    + materials_amount,
+                                    0
+                                ),
+                                GREATEST(
+                                    total_amount
+                                    - paid_amount,
+                                    0
+                                )
+                            )
+                        ),
+                        0
+                    )
+                FROM receivables
+                WHERE client_id = ?
+                  AND competence < ?
+            ");
+
+            $stmt->execute([
+                $client['id'],
+                FINANCIAL_START_COMPETENCE
+            ]);
+
+            $previous =
+                (float)$stmt->fetchColumn();
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | COMPETÊNCIAS POSTERIORES
+        |--------------------------------------------------------------------------
+        |
+        | Mantém a regra normal de vencimento:
+        | uma conta ainda dentro do prazo hoje não vira Saldo anterior de um
+        | mês futuro.
+        |--------------------------------------------------------------------------
+        */ else {
+
+            $stmt = $pdo->prepare("
+                SELECT
+                    GREATEST(
+                        total_amount - paid_amount,
+                        0
+                    )
+                FROM receivables
+                WHERE client_id = ?
+                  AND competence < ?
+                  AND due_date < ?
+                ORDER BY competence DESC
+                LIMIT 1
+            ");
+
+            $stmt->execute([
+                $client['id'],
+                $competence,
+                $todayDate
+            ]);
+
+            $previous =
+                (float)($stmt->fetchColumn() ?: 0);
+        }
 
 
         /*
@@ -2479,6 +2681,25 @@ render_header(
 </div>
 
 
+
+<style>
+    /*
+    |--------------------------------------------------------------------------
+    | TABELA PRINCIPAL - CONTAS A RECEBER
+    |--------------------------------------------------------------------------
+    */
+
+    #receivablesTable> :not(caption)>*>* {
+        padding-top: 0.78rem;
+        padding-bottom: 0.78rem;
+        vertical-align: middle;
+    }
+
+    #receivablesTable tbody tr {
+        min-height: 48px;
+    }
+</style>
+
 <!-- ================================================================
      TABELA
 ================================================================= -->
@@ -2488,9 +2709,11 @@ render_header(
     <div class="table-responsive">
 
         <table
+            id="receivablesTable"
             class="
                 table
-                table-sm
+                table-striped
+                table-hover
                 align-middle
             ">
 

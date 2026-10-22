@@ -361,7 +361,8 @@ function buildBillingSchedule(
     string $occurredAt,
     int $dueDay,
     float $totalAmount,
-    int $installmentCount
+    int $installmentCount,
+    int $currentInstallment = 1
 ): array {
 
     if ($totalAmount <= 0) {
@@ -371,6 +372,15 @@ function buildBillingSchedule(
     if ($installmentCount < 1) {
         $installmentCount = 1;
     }
+
+    $currentInstallment =
+        max(
+            1,
+            min(
+                $currentInstallment,
+                $installmentCount
+            )
+        );
 
     $dueDay = max(1, min($dueDay, 28));
 
@@ -421,7 +431,7 @@ function buildBillingSchedule(
     $schedule = [];
 
     for (
-        $number = 1;
+        $number = $currentInstallment;
         $number <= $installmentCount;
         $number++
     ) {
@@ -430,7 +440,7 @@ function buildBillingSchedule(
             $firstMonth
             ->modify(
                 '+'
-                    . ($number - 1)
+                    . ($number - $currentInstallment)
                     . ' month'
             );
 
@@ -566,42 +576,169 @@ function saveBillingSchedule(
         $chargeType
     ]);
 
-    $currentRows =
-        $stmt->fetchAll();
+    $currentRows = $stmt->fetchAll();
 
-    $hasLinkedInstallment = false;
+    if (
+        billingSchedulesAreEqual(
+            $currentRows,
+            $newSchedule
+        )
+    ) {
+        return;
+    }
+
+    $linkedAmounts = [];
 
     foreach ($currentRows as $row) {
 
-        if (
-            !empty($row['receivable_id'])
-        ) {
-            $hasLinkedInstallment = true;
-            break;
+        $receivableId =
+            (int)($row['receivable_id'] ?? 0);
+
+        if ($receivableId <= 0) {
+            continue;
         }
+
+        if (!isset($linkedAmounts[$receivableId])) {
+            $linkedAmounts[$receivableId] = 0.0;
+        }
+
+        $linkedAmounts[$receivableId] +=
+            (float)$row['amount'];
     }
 
-    if ($hasLinkedInstallment) {
+    foreach (
+        $linkedAmounts
+        as $receivableId => $linkedAmount
+    ) {
+
+        $stmt = $pdo->prepare("
+            SELECT
+                id,
+                paid_amount
+            FROM receivables
+            WHERE id = ?
+            FOR UPDATE
+        ");
+
+        $stmt->execute([
+            $receivableId
+        ]);
+
+        $receivable = $stmt->fetch();
 
         if (
-            !billingSchedulesAreEqual(
-                $currentRows,
-                $newSchedule
-            )
+            $receivable
+            &&
+            (float)$receivable['paid_amount'] > 0
         ) {
 
             throw new Exception(
-                'O parcelamento de '
+                'A cobrança de '
                     . (
                         $chargeType === 'servico'
                         ? 'serviço'
                         : 'materiais'
                     )
-                    . ' já possui parcela vinculada ao Contas a Receber e não pode ser alterado diretamente.'
+                    . ' já possui pagamento registrado no Contas a Receber. '
+                    . 'Estorne primeiro os pagamentos dessa conta antes de alterar o cronograma financeiro.'
             );
         }
+    }
 
-        return;
+    foreach (
+        $linkedAmounts
+        as $receivableId => $linkedAmount
+    ) {
+
+        $stmt = $pdo->prepare("
+            SELECT
+                id,
+                monthly_fee,
+                services_amount,
+                materials_amount,
+                extra_visits_amount,
+                discount_amount,
+                advances_amount,
+                previous_balance,
+                paid_amount
+            FROM receivables
+            WHERE id = ?
+            FOR UPDATE
+        ");
+
+        $stmt->execute([
+            $receivableId
+        ]);
+
+        $receivable = $stmt->fetch();
+
+        if (!$receivable) {
+            continue;
+        }
+
+        $servicesAmount =
+            (float)$receivable['services_amount'];
+
+        $materialsAmount =
+            (float)$receivable['materials_amount'];
+
+        if ($chargeType === 'servico') {
+
+            $servicesAmount =
+                max(
+                    0,
+                    $servicesAmount - $linkedAmount
+                );
+        } else {
+
+            $materialsAmount =
+                max(
+                    0,
+                    $materialsAmount - $linkedAmount
+                );
+        }
+
+        $newTotal =
+            max(
+                0,
+                (float)$receivable['monthly_fee']
+                    + $servicesAmount
+                    + $materialsAmount
+                    + (float)$receivable['extra_visits_amount']
+                    + (float)$receivable['previous_balance']
+                    - (float)$receivable['advances_amount']
+                    - (float)$receivable['discount_amount']
+            );
+
+        $paidAmount =
+            (float)$receivable['paid_amount'];
+
+        $newStatus =
+            $paidAmount >= $newTotal
+            ? 'pago'
+            : (
+                $paidAmount > 0
+                ? 'parcial'
+                : 'pendente'
+            );
+
+        $stmt = $pdo->prepare("
+            UPDATE receivables
+            SET
+                services_amount = ?,
+                materials_amount = ?,
+                total_amount = ?,
+                status = ?
+            WHERE id = ?
+        ");
+
+        $stmt->execute([
+            $servicesAmount,
+            $materialsAmount,
+            $newTotal,
+            $newStatus,
+            $receivableId
+        ]);
     }
 
     $stmt = $pdo->prepare("
@@ -655,7 +792,10 @@ $editTicket = null;
 $editTicketMaterials = [];
 
 $editServiceInstallments = 1;
+$editServiceCurrentInstallment = 1;
+
 $editMaterialInstallments = 1;
+$editMaterialCurrentInstallment = 1;
 
 
 if (isset($_GET['edit'])) {
@@ -730,7 +870,8 @@ if (isset($_GET['edit'])) {
     $stmt = $pdo->prepare("
         SELECT
             charge_type,
-            MAX(installment_count) AS installment_count
+            MAX(installment_count) AS installment_count,
+            MIN(installment_number) AS current_installment
         FROM ticket_billing_installments
         WHERE ticket_id = ?
         GROUP BY charge_type
@@ -755,6 +896,12 @@ if (isset($_GET['edit'])) {
                     1,
                     (int)$billingRow['installment_count']
                 );
+
+            $editServiceCurrentInstallment =
+                max(
+                    1,
+                    (int)$billingRow['current_installment']
+                );
         }
 
         if (
@@ -766,6 +913,12 @@ if (isset($_GET['edit'])) {
                 max(
                     1,
                     (int)$billingRow['installment_count']
+                );
+
+            $editMaterialCurrentInstallment =
+                max(
+                    1,
+                    (int)$billingRow['current_installment']
                 );
         }
     }
@@ -796,6 +949,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
 
 
+    $returnQuery =
+        trim(
+            $_POST['return_query']
+                ?? ''
+        );
+
+    $returnListUrl =
+        base_url('tickets.php')
+        . (
+            $returnQuery !== ''
+            ? '?' . $returnQuery
+            : ''
+        );
+
+
     $client =
         (int)(
             $_POST['client_id']
@@ -804,8 +972,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 
     $occurredAt =
-        $_POST['occurred_at']
-        ?? '';
+        trim(
+            $_POST['occurred_at']
+                ?? ''
+        );
+
+    if (
+        $occurredAt !== ''
+        &&
+        preg_match(
+            '/^\d{4}-\d{2}-\d{2}$/',
+            $occurredAt
+        )
+    ) {
+        $occurredAt .= ' 00:00:00';
+    }
 
 
     $complainant =
@@ -857,6 +1038,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ?? 1
         );
 
+    $serviceCurrentInstallment =
+        (int)(
+            $_POST['service_current_installment']
+            ?? 1
+        );
+
 
     $materialBillingMode =
         $_POST['material_billing_mode']
@@ -866,6 +1053,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $materialInstallments =
         (int)(
             $_POST['material_installments']
+            ?? 1
+        );
+
+    $materialCurrentInstallment =
+        (int)(
+            $_POST['material_current_installment']
             ?? 1
         );
 
@@ -1181,12 +1374,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     */
 
     if (
-        (
-            $hasContract
-            &&
-            $type === 'remoto'
-        )
-        ||
         in_array(
             $type,
             [
@@ -1248,6 +1435,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     ) {
 
         $serviceInstallments = 1;
+        $serviceCurrentInstallment = 1;
     }
 
 
@@ -1271,6 +1459,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : base_url(
                     'tickets.php'
                 )
+        );
+    }
+
+
+    if (
+        $serviceCurrentInstallment < 1
+        ||
+        $serviceCurrentInstallment > $serviceInstallments
+    ) {
+
+        flash(
+            'danger',
+            'O número da parcela atual do serviço deve estar entre 1 e a quantidade total de parcelas.'
+        );
+
+        redirect(
+            $id
+                ? base_url('tickets.php?edit=' . $id)
+                : base_url('tickets.php')
         );
     }
 
@@ -1328,6 +1535,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     ) {
 
         $materialInstallments = 1;
+        $materialCurrentInstallment = 1;
     }
 
 
@@ -1351,6 +1559,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 : base_url(
                     'tickets.php'
                 )
+        );
+    }
+
+
+    if (
+        $materialCurrentInstallment < 1
+        ||
+        $materialCurrentInstallment > $materialInstallments
+    ) {
+
+        flash(
+            'danger',
+            'O número da parcela atual dos materiais deve estar entre 1 e a quantidade total de parcelas.'
+        );
+
+        redirect(
+            $id
+                ? base_url('tickets.php?edit=' . $id)
+                : base_url('tickets.php')
         );
     }
 
@@ -1435,7 +1662,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $occurredAt,
                 $clientDueDay,
                 $amount,
-                $serviceInstallments
+                $serviceInstallments,
+                $serviceCurrentInstallment
             );
     }
 
@@ -1453,7 +1681,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $occurredAt,
                 $clientDueDay,
                 $newMaterialsAmount,
-                $materialInstallments
+                $materialInstallments,
+                $materialCurrentInstallment
             );
     }
 
@@ -1812,9 +2041,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 
             redirect(
-                base_url(
-                    'tickets.php'
-                )
+                $returnListUrl
             );
         }
 
@@ -2515,9 +2742,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 
         redirect(
-            base_url(
-                'tickets.php'
-            )
+            $returnListUrl
         );
     } catch (Throwable $e) {
 
@@ -2535,15 +2760,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
 
 
+        if ($id) {
+
+            $errorParams =
+                [];
+
+            if ($returnQuery !== '') {
+                parse_str(
+                    $returnQuery,
+                    $errorParams
+                );
+            }
+
+            $errorParams['edit'] =
+                $id;
+
+            redirect(
+                base_url('tickets.php')
+                    . '?'
+                    . http_build_query(
+                        $errorParams
+                    )
+            );
+        }
+
         redirect(
-            $id
-                ? base_url(
-                    'tickets.php?edit='
-                        . $id
-                )
-                : base_url(
-                    'tickets.php'
-                )
+            $returnListUrl
         );
     }
 }
@@ -2692,6 +2934,13 @@ $filterEnd =
     );
 
 
+$filterSearch =
+    trim(
+        $_GET['q']
+            ?? ''
+    );
+
+
 $allowedFilterStatuses = [
 
     '',
@@ -2804,11 +3053,81 @@ if ($filterEnd !== '') {
 }
 
 
+if ($filterSearch !== '') {
+
+    $where[] = "(
+        t.ticket_number LIKE ?
+        OR c.name LIKE ?
+        OR t.complainant LIKE ?
+        OR t.request_text LIKE ?
+        OR t.solution_text LIKE ?
+        OR t.service_description LIKE ?
+        OR t.notes LIKE ?
+        OR EXISTS (
+            SELECT 1
+            FROM ticket_materials tm_search
+            WHERE tm_search.ticket_id = t.id
+              AND tm_search.description LIKE ?
+        )
+        OR EXISTS (
+            SELECT 1
+            FROM ticket_materials tm_search2
+            INNER JOIN materials m_search
+                ON m_search.id = tm_search2.material_id
+            WHERE tm_search2.ticket_id = t.id
+              AND m_search.description LIKE ?
+        )
+    )";
+
+    $searchLike =
+        '%'
+        . $filterSearch
+        . '%';
+
+    for ($i = 0; $i < 9; $i++) {
+        $params[] = $searchLike;
+    }
+}
+
+
 $whereSql =
     implode(
         ' AND ',
         $where
     );
+
+
+/*
+|--------------------------------------------------------------------------
+| PARÂMETROS ATUAIS DA LISTAGEM
+|--------------------------------------------------------------------------
+|
+| São reutilizados nos links de Editar e nas abas de status para que a
+| pesquisa permaneça exatamente como estava.
+|--------------------------------------------------------------------------
+*/
+
+$currentListParams = [];
+
+if ($filterStatus !== '') {
+    $currentListParams['status'] = $filterStatus;
+}
+
+if ($filterClient > 0) {
+    $currentListParams['client_id'] = $filterClient;
+}
+
+if ($filterStart !== '') {
+    $currentListParams['date_start'] = $filterStart;
+}
+
+if ($filterEnd !== '') {
+    $currentListParams['date_end'] = $filterEnd;
+}
+
+if ($filterSearch !== '') {
+    $currentListParams['q'] = $filterSearch;
+}
 
 
 /*
@@ -3120,6 +3439,15 @@ render_header(
                                         ?? ''
                                 ) ?>">
 
+                    <input
+                        type="hidden"
+                        name="return_query"
+                        value="<?= e(
+                                    http_build_query(
+                                        $currentListParams
+                                    )
+                                ) ?>">
+
 
                     <!-- DATA -->
 
@@ -3127,28 +3455,28 @@ render_header(
 
                         <label class="form-label">
 
-                            Data e horário
+                            Data
 
                         </label>
 
 
                         <input
                             class="form-control"
-                            type="datetime-local"
+                            type="date"
                             name="occurred_at"
                             value="<?= e(
 
                                         $editTicket
 
                                             ? date(
-                                                'Y-m-d\TH:i',
+                                                'Y-m-d',
                                                 strtotime(
                                                     $editTicket['occurred_at']
                                                 )
                                             )
 
                                             : date(
-                                                'Y-m-d\TH:i'
+                                                'Y-m-d'
                                             )
 
                                     ) ?>"
@@ -3518,7 +3846,7 @@ render_header(
 
                         <div class="row g-2 mb-2">
 
-                            <div class="col-md-6">
+                            <div class="col-md-5">
 
                                 <label class="form-label">
                                     Forma de cobrança
@@ -3553,29 +3881,45 @@ render_header(
 
 
                             <div
-                                class="col-md-6"
+                                class="col-md-7"
                                 id="serviceInstallmentsContainer"
-                                style="<?= $editServiceInstallments > 1
-                                            ? ''
-                                            : 'display:none;'
-                                        ?>">
+                                style="<?= $editServiceInstallments > 1 ? '' : 'display:none;' ?>">
 
-                                <label class="form-label">
-                                    Quantidade de parcelas
-                                </label>
+                                <div class="row g-2">
 
-                                <input
-                                    class="form-control"
-                                    type="number"
-                                    min="2"
-                                    max="60"
-                                    step="1"
-                                    name="service_installments"
-                                    id="service_installments"
-                                    value="<?= (int)max(
-                                                2,
-                                                $editServiceInstallments
-                                            ) ?>">
+                                    <div class="col-6">
+                                        <label class="form-label">
+                                            Quantidade de parcelas
+                                        </label>
+
+                                        <input
+                                            class="form-control"
+                                            type="number"
+                                            min="2"
+                                            max="60"
+                                            step="1"
+                                            name="service_installments"
+                                            id="service_installments"
+                                            value="<?= (int)max(2, $editServiceInstallments) ?>">
+                                    </div>
+
+                                    <div class="col-6">
+                                        <label class="form-label">
+                                            Parcela atual
+                                        </label>
+
+                                        <input
+                                            class="form-control"
+                                            type="number"
+                                            min="1"
+                                            max="<?= (int)max(2, $editServiceInstallments) ?>"
+                                            step="1"
+                                            name="service_current_installment"
+                                            id="service_current_installment"
+                                            value="<?= (int)max(1, $editServiceCurrentInstallment) ?>">
+                                    </div>
+
+                                </div>
 
                             </div>
 
@@ -3834,7 +4178,7 @@ render_header(
 
                             <div class="row g-2">
 
-                                <div class="col-md-6">
+                                <div class="col-md-5">
 
                                     <label class="form-label">
                                         Forma de cobrança
@@ -3869,36 +4213,52 @@ render_header(
 
 
                                 <div
-                                    class="col-md-6"
+                                    class="col-md-7"
                                     id="materialInstallmentsContainer"
-                                    style="<?= $editMaterialInstallments > 1
-                                                ? ''
-                                                : 'display:none;'
-                                            ?>">
+                                    style="<?= $editMaterialInstallments > 1 ? '' : 'display:none;' ?>">
 
-                                    <label class="form-label">
-                                        Quantidade de parcelas
-                                    </label>
+                                    <div class="row g-2">
 
-                                    <input
-                                        class="form-control"
-                                        type="number"
-                                        min="2"
-                                        max="60"
-                                        step="1"
-                                        name="material_installments"
-                                        id="material_installments"
-                                        value="<?= (int)max(
-                                                    2,
-                                                    $editMaterialInstallments
-                                                ) ?>">
+                                        <div class="col-6">
+                                            <label class="form-label">
+                                                Quantidade de parcelas
+                                            </label>
+
+                                            <input
+                                                class="form-control"
+                                                type="number"
+                                                min="2"
+                                                max="60"
+                                                step="1"
+                                                name="material_installments"
+                                                id="material_installments"
+                                                value="<?= (int)max(2, $editMaterialInstallments) ?>">
+                                        </div>
+
+                                        <div class="col-6">
+                                            <label class="form-label">
+                                                Parcela atual
+                                            </label>
+
+                                            <input
+                                                class="form-control"
+                                                type="number"
+                                                min="1"
+                                                max="<?= (int)max(2, $editMaterialInstallments) ?>"
+                                                step="1"
+                                                name="material_current_installment"
+                                                id="material_current_installment"
+                                                value="<?= (int)max(1, $editMaterialCurrentInstallment) ?>">
+                                        </div>
+
+                                    </div>
 
                                 </div>
 
-                            </div>
+                                <div class="form-text mt-2">
+                                    O parcelamento é aplicado ao total dos materiais vendidos neste chamado.
+                                </div>
 
-                            <div class="form-text mt-2">
-                                O parcelamento é aplicado ao total dos materiais vendidos neste chamado.
                             </div>
 
                         </div>
@@ -3948,9 +4308,12 @@ render_header(
 
                         <a
                             href="<?= e(
-                                        base_url(
-                                            'tickets.php'
-                                        )
+                                        base_url('tickets.php')
+                                            . (
+                                                !empty($currentListParams)
+                                                ? '?' . http_build_query($currentListParams)
+                                                : ''
+                                            )
                                     ) ?>"
                             class="btn btn-secondary">
 
@@ -4101,6 +4464,16 @@ render_header(
             <?php endif; ?>
 
 
+            <?php if ($filterSearch !== ''): ?>
+
+                <input
+                    type="hidden"
+                    name="q"
+                    value="<?= e($filterSearch) ?>">
+
+            <?php endif; ?>
+
+
             <div class="row g-2">
 
 
@@ -4244,10 +4617,46 @@ render_header(
 
         <!-- PESQUISA -->
 
-        <input
-            class="form-control mb-2"
-            placeholder="Pesquisa instantânea"
-            data-search-table="#ticketTable">
+        <form
+            method="get"
+            class="mb-2"
+            id="ticketDatabaseSearchForm">
+
+            <?php if ($filterStatus !== ''): ?>
+                <input type="hidden" name="status" value="<?= e($filterStatus) ?>">
+            <?php endif; ?>
+
+            <?php if ($filterClient > 0): ?>
+                <input type="hidden" name="client_id" value="<?= (int)$filterClient ?>">
+            <?php endif; ?>
+
+            <?php if ($filterStart !== ''): ?>
+                <input type="hidden" name="date_start" value="<?= e($filterStart) ?>">
+            <?php endif; ?>
+
+            <?php if ($filterEnd !== ''): ?>
+                <input type="hidden" name="date_end" value="<?= e($filterEnd) ?>">
+            <?php endif; ?>
+
+            <div class="input-group">
+
+                <input
+                    class="form-control"
+                    type="search"
+                    name="q"
+                    id="ticketDatabaseSearch"
+                    value="<?= e($filterSearch) ?>"
+                    placeholder="Pesquisar no banco: chamado, cliente, solicitação, solução, serviço ou material">
+
+                <button
+                    class="btn btn-primary"
+                    type="submit">
+                    🔎
+                </button>
+
+            </div>
+
+        </form>
 
 
         <!-- TABELA -->
@@ -4260,9 +4669,10 @@ render_header(
                     id="ticketTable"
                     class="
                         table
-                        table-sm
+                        table-striped
                         table-hover
                         align-middle
+                        ticket-table-large
                     ">
 
 
@@ -4330,7 +4740,7 @@ render_header(
                                 <td class="text-nowrap">
 
                                     <?= date(
-                                        'd/m/Y H:i',
+                                        'd/m/Y',
                                         strtotime(
                                             $row['occurred_at']
                                         )
@@ -4419,10 +4829,16 @@ render_header(
 
                                     <a
                                         href="<?= e(
-                                                    base_url(
-                                                        'tickets.php?edit='
-                                                            . $row['id']
-                                                    )
+                                                    base_url('tickets.php')
+                                                        . '?'
+                                                        . http_build_query(
+                                                            array_merge(
+                                                                $currentListParams,
+                                                                [
+                                                                    'edit' => (int)$row['id']
+                                                                ]
+                                                            )
+                                                        )
                                                 ) ?>"
                                         class="
                                             btn
@@ -4477,6 +4893,20 @@ render_header(
 
 
 </div>
+
+
+
+<style>
+    #ticketTable.ticket-table-large> :not(caption)>*>* {
+        padding-top: 0.72rem;
+        padding-bottom: 0.72rem;
+        vertical-align: middle;
+    }
+
+    #ticketTable.ticket-table-large tbody tr {
+        min-height: 46px;
+    }
+</style>
 
 
 <!-- =====================================================================
@@ -4832,6 +5262,11 @@ render_header(
                     'service_installments'
                 );
 
+            const serviceCurrentInstallment =
+                document.getElementById(
+                    'service_current_installment'
+                );
+
 
             /*
             |--------------------------------------------------------------------------
@@ -4980,6 +5415,11 @@ render_header(
             const materialInstallments =
                 document.getElementById(
                     'material_installments'
+                );
+
+            const materialCurrentInstallment =
+                document.getElementById(
+                    'material_current_installment'
                 );
 
 
@@ -5147,5 +5587,53 @@ render_header(
         }
     );
 </script>
+
+
+<script>
+    document.addEventListener(
+        'DOMContentLoaded',
+        function() {
+
+            const searchInput =
+                document.getElementById(
+                    'ticketDatabaseSearch'
+                );
+
+            const searchForm =
+                document.getElementById(
+                    'ticketDatabaseSearchForm'
+                );
+
+            if (
+                searchInput &&
+                searchForm
+            ) {
+
+                let searchTimer = null;
+
+                searchInput.addEventListener(
+                    'input',
+                    function() {
+
+                        clearTimeout(
+                            searchTimer
+                        );
+
+                        searchTimer =
+                            setTimeout(
+                                function() {
+
+                                    searchForm.submit();
+
+                                },
+                                550
+                            );
+                    }
+                );
+            }
+        }
+    );
+</script>
+
 
 <?php render_footer(); ?>
