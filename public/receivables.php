@@ -12,15 +12,9 @@ $pdo = db();
 | INÍCIO DO CONTROLE FINANCEIRO
 |--------------------------------------------------------------------------
 |
-| A empresa começou a utilizar o Contas a Receber em 09/2026.
-|
-| Regra de implantação:
-| - competências anteriores NÃO carregam mensalidades antigas como pendência;
-| - na competência inicial (09/2026), somente cobranças históricas de
-|   SERVIÇOS e MATERIAIS entram como Saldo anterior;
-| - a partir das competências seguintes, o fluxo normal de saldo anterior
-|   passa a valer.
-|
+| 09/2026 é a competência inicial do Contas a Receber.
+| Competências anteriores não carregam mensalidades antigas como pendência.
+|--------------------------------------------------------------------------
 */
 
 const FINANCIAL_START_COMPETENCE = '2026-09';
@@ -132,14 +126,8 @@ function competenceFromDate(string $date): DateTimeImmutable
 
 /*
 |--------------------------------------------------------------------------
-| PRIMEIRA COMPETÊNCIA QUE PRECISA SER RECALCULADA
+| PRIMEIRA COMPETÊNCIA A RECALCULAR
 |--------------------------------------------------------------------------
-|
-| Quando um chamado antigo é lançado depois, precisamos recalcular as
-| competências desde o primeiro movimento financeiro relevante até o período
-| pesquisado. Assim uma cobrança antiga passa a compor corretamente o saldo
-| anterior do mês atual.
-|
 */
 
 function firstReceivableCompetenceToRecalculate(
@@ -150,11 +138,6 @@ function firstReceivableCompetenceToRecalculate(
     $candidates = [
         $requestedFirstCompetence
     ];
-
-
-    /*
-    | Primeira competência já existente no Contas a Receber.
-    */
 
     $minReceivable =
         $pdo->query("
@@ -173,11 +156,6 @@ function firstReceivableCompetenceToRecalculate(
             );
     }
 
-
-    /*
-    | Primeira parcela de chamado ainda existente.
-    */
-
     $minInstallment =
         $pdo->query("
             SELECT MIN(due_date)
@@ -190,12 +168,10 @@ function firstReceivableCompetenceToRecalculate(
             ->modify('first day of this month');
     }
 
-
     $first =
         $requestedFirstCompetence;
 
     foreach ($candidates as $candidate) {
-
         if ($candidate < $first) {
             $first = $candidate;
         }
@@ -614,34 +590,16 @@ function recalculate_cycle(
         | SALDO ANTERIOR
         |--------------------------------------------------------------------------
         |
-        | Há uma regra especial de implantação para 09/2026:
-        |
-        | 1) Antes de 09/2026
-        |    Não carregamos saldo anterior entre competências. Isso impede que
-        |    mensalidades antigas, anteriores ao início do uso do financeiro,
-        |    contaminem o mês de implantação.
-        |
-        | 2) Em 09/2026
-        |    O Saldo anterior considera SOMENTE cobranças históricas de
-        |    SERVIÇOS e MATERIAIS ainda pendentes. Mensalidades antigas,
-        |    visitas e demais componentes anteriores não entram.
-        |
-        | 3) Depois de 09/2026
-        |    Volta a regra normal: a última conta anterior já vencida carrega
-        |    seu saldo pendente para a competência seguinte.
+        | 09/2026 é a competência de implantação:
+        | - antes dela, não propagamos mensalidades antigas;
+        | - em 09/2026, entram somente serviços e materiais históricos pendentes;
+        | - após 09/2026, segue a cadeia normal apenas para contas vencidas.
         |--------------------------------------------------------------------------
         */
 
         $todayDate =
             (new DateTimeImmutable('today'))
             ->format('Y-m-d');
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | COMPETÊNCIAS ANTERIORES AO INÍCIO FINANCEIRO
-        |--------------------------------------------------------------------------
-        */
 
         if (
             $competence
@@ -650,20 +608,7 @@ function recalculate_cycle(
         ) {
 
             $previous = 0.0;
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | COMPETÊNCIA DE IMPLANTAÇÃO
-        |--------------------------------------------------------------------------
-        |
-        | Soma apenas a parcela ainda pendente correspondente a serviços e
-        | materiais das competências anteriores.
-        |
-        | LEAST() evita considerar mensalidade antiga como parte dessa abertura.
-        |--------------------------------------------------------------------------
-        */ elseif (
+        } elseif (
             $competence
             ===
             FINANCIAL_START_COMPETENCE
@@ -700,19 +645,7 @@ function recalculate_cycle(
 
             $previous =
                 (float)$stmt->fetchColumn();
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | COMPETÊNCIAS POSTERIORES
-        |--------------------------------------------------------------------------
-        |
-        | Mantém a regra normal de vencimento:
-        | uma conta ainda dentro do prazo hoje não vira Saldo anterior de um
-        | mês futuro.
-        |--------------------------------------------------------------------------
-        */ else {
+        } else {
 
             $stmt = $pdo->prepare("
                 SELECT
@@ -2683,20 +2616,76 @@ render_header(
 
 
 <style>
-    /*
-    |--------------------------------------------------------------------------
-    | TABELA PRINCIPAL - CONTAS A RECEBER
-    |--------------------------------------------------------------------------
-    */
+    #receivablesTable {
+        font-size: 0.92rem;
+    }
 
     #receivablesTable> :not(caption)>*>* {
         padding-top: 0.78rem;
         padding-bottom: 0.78rem;
+        padding-left: 0.55rem;
+        padding-right: 0.55rem;
         vertical-align: middle;
     }
 
-    #receivablesTable tbody tr {
-        min-height: 48px;
+    #receivablesTable th,
+    #receivablesTable td {
+        white-space: nowrap;
+    }
+
+    #receivablesTable .client-cell {
+        white-space: normal;
+        min-width: 145px;
+    }
+
+    #receivablesTable .installment-cell {
+        white-space: normal;
+        min-width: 145px;
+        line-height: 1.35;
+    }
+
+    .receivable-status {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-width: 82px;
+        padding: 0.42rem 0.72rem;
+        border-radius: 999px;
+        font-size: 0.84rem;
+        font-weight: 700;
+        line-height: 1;
+        color: #fff;
+        text-transform: capitalize;
+    }
+
+    .receivable-status-paid {
+        background: var(--bs-success);
+    }
+
+    .receivable-status-pending {
+        background: tomato;
+    }
+
+    .receivable-status-partial {
+        background: var(--bs-warning);
+        color: #212529;
+    }
+
+    .actions-menu-button {
+        min-width: 42px;
+        font-size: 1.2rem;
+        line-height: 1;
+        font-weight: 700;
+        letter-spacing: 2px;
+    }
+
+    .receivable-actions .dropdown-menu {
+        min-width: 210px;
+    }
+
+    .receivable-actions .dropdown-item {
+        padding-top: 0.55rem;
+        padding-bottom: 0.55rem;
     }
 </style>
 
@@ -2771,15 +2760,15 @@ render_header(
                     </th>
 
                     <th>
-                        Status
-                    </th>
-
-                    <th>
                         Parcelas
                     </th>
 
                     <th>
-                        Pagamento
+                        Status
+                    </th>
+
+                    <th class="text-center">
+                        Ações
                     </th>
 
                 </tr>
@@ -2809,7 +2798,7 @@ render_header(
                     <tr>
 
 
-                        <td>
+                        <td class="client-cell">
 
                             <?= e(
                                 $row['client']
@@ -2920,16 +2909,7 @@ render_header(
                         </td>
 
 
-                        <td>
-
-                            <?= e(
-                                $row['status']
-                            ) ?>
-
-                        </td>
-
-
-                        <td class="small text-nowrap">
+                        <td class="small installment-cell">
 
                             <?php if (
                                 !empty($row['installment_info'])
@@ -2952,65 +2932,99 @@ render_header(
                         </td>
 
 
-                        <td class="text-nowrap">
+                        <td>
 
-                            <div class="d-flex gap-1 flex-wrap">
+                            <?php
 
-                                <?php if (
-                                    $balance > 0
-                                ): ?>
+                            $statusClass =
+                                match ($row['status']) {
+                                    'pago' =>
+                                    'receivable-status-paid',
+                                    'pendente' =>
+                                    'receivable-status-pending',
+                                    'parcial' =>
+                                    'receivable-status-partial',
+                                    default =>
+                                    'bg-secondary',
+                                };
 
-                                    <button
-                                        type="button"
-                                        class="
-                                            btn
-                                            btn-sm
-                                            btn-success
-                                        "
-                                        data-bs-toggle="modal"
-                                        data-bs-target="#paymentModal<?= (int)$row['id'] ?>">
-                                        Registrar pagamento
-                                    </button>
+                            ?>
 
-                                <?php else: ?>
+                            <span
+                                class="receivable-status <?= e($statusClass) ?>">
+                                <?= e($row['status']) ?>
+                            </span>
 
-                                    <span class="badge bg-success align-self-center">
-                                        Pago
-                                    </span>
-
-                                <?php endif; ?>
+                        </td>
 
 
-                                <button
-                                    type="button"
-                                    class="
-                                        btn
-                                        btn-sm
-                                        btn-outline-secondary
-                                    "
-                                    data-bs-toggle="modal"
-                                    data-bs-target="#paymentHistoryModal<?= (int)$row['id'] ?>">
-                                    Histórico
-                                </button>
+                        <td class="text-center receivable-actions">
+
+                            <div class="dropdown">
 
                                 <button
+                                    class="btn btn-sm btn-outline-secondary actions-menu-button"
                                     type="button"
-                                    class="btn btn-sm btn-outline-primary"
-                                    data-bs-toggle="modal"
-                                    data-bs-target="#discountModal<?= (int)$row['id'] ?>">
-                                    Desconto
+                                    data-bs-toggle="dropdown"
+                                    aria-expanded="false"
+                                    title="Ações">
+                                    ⋮
                                 </button>
 
-                                <a
-                                    class="btn btn-sm btn-outline-dark"
-                                    href="<?= e(
-                                                base_url(
-                                                    'receivable_report.php?id='
-                                                        . (int)$row['id']
-                                                )
-                                            ) ?>">
-                                    Relatório
-                                </a>
+                                <ul class="dropdown-menu dropdown-menu-end">
+
+                                    <?php if ($balance > 0): ?>
+
+                                        <li>
+                                            <button
+                                                type="button"
+                                                class="dropdown-item"
+                                                data-bs-toggle="modal"
+                                                data-bs-target="#paymentModal<?= (int)$row['id'] ?>">
+                                                Registrar pagamento
+                                            </button>
+                                        </li>
+
+                                        <li>
+                                            <button
+                                                type="button"
+                                                class="dropdown-item"
+                                                data-bs-toggle="modal"
+                                                data-bs-target="#discountModal<?= (int)$row['id'] ?>">
+                                                Desconto
+                                            </button>
+                                        </li>
+
+                                    <?php endif; ?>
+
+                                    <li>
+                                        <button
+                                            type="button"
+                                            class="dropdown-item"
+                                            data-bs-toggle="modal"
+                                            data-bs-target="#paymentHistoryModal<?= (int)$row['id'] ?>">
+                                            Histórico
+                                        </button>
+                                    </li>
+
+                                    <li>
+                                        <hr class="dropdown-divider">
+                                    </li>
+
+                                    <li>
+                                        <a
+                                            class="dropdown-item"
+                                            href="<?= e(
+                                                        base_url(
+                                                            'receivable_report.php?id='
+                                                                . (int)$row['id']
+                                                        )
+                                                    ) ?>">
+                                            Relatório
+                                        </a>
+                                    </li>
+
+                                </ul>
 
                             </div>
 
