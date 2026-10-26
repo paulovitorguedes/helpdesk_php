@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../src/layout.php';
 
 require_auth();
+if (!role_allowed(['admin', 'financeiro'])) exit('Acesso negado.');
 
 $pdo = db();
 

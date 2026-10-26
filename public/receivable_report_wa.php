@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../src/layout.php';
 
 require_auth();
+if (!role_allowed(['admin', 'financeiro'])) exit('Acesso negado.');
 
 $pdo = db();
 
@@ -101,8 +102,8 @@ $balance =
     max(
         0,
         (float)$receivable['total_amount']
-        -
-        (float)$receivable['paid_amount']
+            -
+            (float)$receivable['paid_amount']
     );
 
 
@@ -188,17 +189,17 @@ foreach ($materialInstallments as $installment) {
 
         $materials[] = [
             'ticket_number' =>
-                $installment['ticket_number'],
+            $installment['ticket_number'],
             'description' =>
-                $material['description'],
+            $material['description'],
             'quantity' =>
-                $material['quantity'],
+            $material['quantity'],
             'installment_number' =>
-                $installment['installment_number'],
+            $installment['installment_number'],
             'installment_count' =>
-                $installment['installment_count'],
+            $installment['installment_count'],
             'installment_amount' =>
-                $installment['installment_amount']
+            $installment['installment_amount']
         ];
     }
 }
@@ -246,11 +247,11 @@ if ($receivable['has_contract']) {
 
         $chargedVisits[] = [
             'ticket_number' =>
-                $ticket['ticket_number'],
+            $ticket['ticket_number'],
             'occurred_at' =>
-                $ticket['occurred_at'],
+            $ticket['occurred_at'],
             'amount' =>
-                (float)$receivable['extra_visit_fee']
+            (float)$receivable['extra_visit_fee']
         ];
     }
 }
@@ -301,8 +302,8 @@ $competence =
 
 $competenceLabel =
     $competence
-        ? $competence->format('m/Y')
-        : $receivable['competence'];
+    ? $competence->format('m/Y')
+    : $receivable['competence'];
 
 
 $lines = [];
@@ -544,8 +545,8 @@ header(
 
 header(
     'Content-Disposition: attachment; filename="'
-    . $filename
-    . '"'
+        . $filename
+        . '"'
 );
 
 header(

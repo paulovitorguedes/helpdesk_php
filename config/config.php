@@ -1,6 +1,6 @@
 <?php
 return [
-    'app_name' => 'GMB Help-Desk ERP',
+    'app_name' => 'Help-Desk ERP',
     'base_url' => getenv('APP_BASE_URL') ?: '/helpdesk_php/public',
     'db' => [
         'host' => getenv('DB_HOST') ?: '127.0.0.1',
