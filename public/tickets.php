@@ -3131,6 +3131,32 @@ if ($filterSearch !== '') {
 }
 
 
+
+
+/*
+|--------------------------------------------------------------------------
+| PAGINACAO
+|--------------------------------------------------------------------------
+*/
+
+$stmtCount = $pdo->prepare("
+    SELECT COUNT(*)
+
+    FROM tickets t
+
+    INNER JOIN clients c
+        ON c.id = t.client_id
+
+    WHERE {$whereSql}
+");
+
+$stmtCount->execute($params);
+
+$pg = pagination_state(
+    (int)$stmtCount->fetchColumn()
+);
+
+
 /*
 |--------------------------------------------------------------------------
 | LISTAGEM
@@ -3175,7 +3201,9 @@ $sql = "
     ORDER BY
         t.occurred_at DESC
 
-    LIMIT 500
+        LIMIT {$pg['limite']}
+
+    OFFSET {$pg['offset']}
 ";
 
 
@@ -4886,6 +4914,8 @@ render_header(
                 </table>
 
             </div>
+
+            <?= pagination_render($pg) ?>
 
         </div>
 

@@ -115,3 +115,5 @@ function cycle_from_close_date(string $closeDate): array
     $start = $end->modify('-1 month')->setDate((int)$end->modify('-1 month')->format('Y'), (int)$end->modify('-1 month')->format('m'), 16);
     return [$start->format('Y-m-d'), $end->format('Y-m-d')];
 }
+
+require_once __DIR__ . '/pagination.php';
