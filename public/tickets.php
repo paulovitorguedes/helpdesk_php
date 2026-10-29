@@ -789,6 +789,35 @@ function saveBillingSchedule(
 |--------------------------------------------------------------------------
 */
 
+/*
+|--------------------------------------------------------------------------
+| TRAVA DE EDICAO
+|--------------------------------------------------------------------------
+*/
+
+function ticket_locked(
+    PDO $pdo,
+    int $ticketId
+): bool {
+
+    if ($ticketId <= 0) {
+        return false;
+    }
+
+    $stmt = $pdo->prepare("
+        SELECT COUNT(*)
+        FROM ticket_billing_installments tbi
+        INNER JOIN receivables r
+            ON r.id = tbi.receivable_id
+        WHERE tbi.ticket_id = ?
+          AND r.paid_amount > 0
+    ");
+
+    $stmt->execute([$ticketId]);
+
+    return (int)$stmt->fetchColumn() > 0;
+}
+
 $editTicket = null;
 $editTicketMaterials = [];
 
@@ -1644,6 +1673,137 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     /*
     |--------------------------------------------------------------------------
+    | TRAVA DE EDICAO APOS RECEBIMENTO
+    |--------------------------------------------------------------------------
+    |
+    | Com pagamento registrado, apenas Solicitante, Solicitacao e
+    | Solucao podem mudar. Os demais campos sao regravados com o
+    | valor que esta no banco, mesmo que cheguem alterados no POST.
+    |--------------------------------------------------------------------------
+    */
+
+    $ticketLocked = ticket_locked($pdo, $id);
+
+    if ($ticketLocked) {
+
+        $stmtLock =
+            $pdo->prepare("
+                SELECT *
+                FROM tickets
+                WHERE id = ?
+            ");
+
+        $stmtLock->execute([$id]);
+
+        $lockedRow =
+            $stmtLock->fetch();
+
+        if (!$lockedRow) {
+            throw new Exception(
+                'Chamado nao encontrado.'
+            );
+        }
+
+         $occurredAt = (string)$lockedRow['occurred_at'];
+         $client = (int)$lockedRow['client_id'];
+         $type = (string)$lockedRow['service_type'];
+         $notes = (string)$lockedRow['notes'];
+         $status = (string)$lockedRow['status'];
+         $serviceDescription = (string)$lockedRow['service_description'];
+         $charged = (int)$lockedRow['service_charged'];
+         $amount = (float)$lockedRow['service_amount'];
+
+        $newMaterialItems = [];
+
+        $stmtLockMat =
+            $pdo->prepare("
+                SELECT
+                    material_id,
+                    quantity,
+                    unit_price
+                FROM ticket_materials
+                WHERE ticket_id = ?
+                ORDER BY id
+            ");
+
+        $stmtLockMat->execute([$id]);
+
+        foreach (
+            $stmtLockMat->fetchAll()
+            as $lockedMaterial
+        ) {
+            $newMaterialItems[] = [
+                'material_id' => (int)$lockedMaterial['material_id'],
+                'quantity' => (float)$lockedMaterial['quantity'],
+                'unit_price' => (float)$lockedMaterial['unit_price']
+            ];
+        }
+
+        $newMaterialsAmount =
+            materialItemsTotal(
+                $newMaterialItems
+            );
+
+        $serviceInstallments = 1;
+        $serviceCurrentInstallment = 1;
+        $materialInstallments = 1;
+        $materialCurrentInstallment = 1;
+
+        $stmtLockInst =
+            $pdo->prepare("
+                SELECT
+                    charge_type,
+                    MAX(installment_count) AS installment_count,
+                    MIN(installment_number) AS current_installment
+                FROM ticket_billing_installments
+                WHERE ticket_id = ?
+                GROUP BY charge_type
+            ");
+
+        $stmtLockInst->execute([$id]);
+
+        foreach (
+            $stmtLockInst->fetchAll()
+            as $lockedBilling
+        ) {
+            if (
+                $lockedBilling['charge_type']
+                === 'servico'
+            ) {
+                $serviceInstallments =
+                    max(
+                        1,
+                        (int)$lockedBilling['installment_count']
+                    );
+
+                $serviceCurrentInstallment =
+                    max(
+                        1,
+                        (int)$lockedBilling['current_installment']
+                    );
+            }
+
+            if (
+                $lockedBilling['charge_type']
+                === 'materiais'
+            ) {
+                $materialInstallments =
+                    max(
+                        1,
+                        (int)$lockedBilling['installment_count']
+                    );
+
+                $materialCurrentInstallment =
+                    max(
+                        1,
+                        (int)$lockedBilling['current_installment']
+                    );
+            }
+        }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
     | CRONOGRAMAS FINANCEIROS
     |--------------------------------------------------------------------------
     */
@@ -2448,6 +2608,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
 
 
+        if (!$ticketLocked) {
+
         /*
         |--------------------------------------------------------------------------
         | RECRIAR ITENS DO CHAMADO
@@ -2702,6 +2864,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             }
         }
 
+
+        }
 
         /*
         |--------------------------------------------------------------------------
