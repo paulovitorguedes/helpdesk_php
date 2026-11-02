@@ -1,5 +1,5 @@
 <?php
-require_once __DIR__ . '/../src/layout.php'; require_auth();$pdo=db();
+require_once __DIR__ . '/../src/layout.php'; require_page_access('reports.php');$pdo=db();
 if(isset($_GET['export'])){$type=$_GET['export'];header('Content-Type: text/csv; charset=UTF-8');header('Content-Disposition: attachment; filename="gmb_'.$type.'_'.date('Ymd_His').'.csv"');$o=fopen('php://output','w');fputs($o,"\xEF\xBB\xBF");if($type==='clientes'){$rows=$pdo->query('SELECT name,document,phone,email,status,has_contract,monthly_fee FROM clients WHERE deleted_at IS NULL');fputcsv($o,['Nome','CPF/CNPJ','Telefone','E-mail','Status','Contrato','Mensalidade'],';');foreach($rows as $r)fputcsv($o,$r,';');}elseif($type==='chamados'){$rows=$pdo->query('SELECT ticket_no,occurred_at,c.name,complainant,service_type,status,service_amount FROM tickets t JOIN clients c ON c.id=t.client_id ORDER BY occurred_at');fputcsv($o,['Numero','Data','Cliente','Reclamante','Tipo','Status','Servico'],';');foreach($rows as $r)fputcsv($o,$r,';');}elseif($type==='financeiro'){$rows=$pdo->query('SELECT c.name,competence,due_date,total_amount,paid_amount,status FROM receivables r JOIN clients c ON c.id=r.client_id ORDER BY due_date');fputcsv($o,['Cliente','Competencia','Vencimento','Total','Pago','Status'],';');foreach($rows as $r)fputcsv($o,$r,';');}fclose($o);exit;}
 render_header('Relatórios');
 ?>

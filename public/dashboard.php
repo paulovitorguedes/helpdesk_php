@@ -2,7 +2,7 @@
 
 require_once __DIR__ . '/../src/layout.php';
 
-require_auth();
+require_page_access('dashboard.php');
 
 $year =
     (int)(

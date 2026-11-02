@@ -1,6 +1,6 @@
 <?php
 require_once __DIR__ . '/../src/layout.php';
-if (auth_user()) redirect(base_url('dashboard.php'));
+if (auth_user()) redirect(auth_home_url());
 $error = '';
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
@@ -21,7 +21,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ->execute([$u['id']]);
 
         $_SESSION['user'] = ['id' => $u['id'], 'name' => $u['name'], 'email' => $u['email'], 'role' => $u['role']];
-        redirect(base_url('dashboard.php'));
+        redirect(auth_home_url());
     } else {
         if ($u) {
             $tentativas = (int)$u['failed_attempts'] + 1;

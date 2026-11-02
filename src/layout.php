@@ -21,7 +21,10 @@ function render_header(string $title): void
     echo '</head><body><div class="app-shell">';
     if ($u) {
         echo '<aside class="sidebar"><div class="brand">Help-Desk</div><nav class="nav flex-column">';
-        foreach ($menu as $file => $label) echo '<a class="nav-link" href="' . e(base_url($file)) . '">' . e($label) . '</a>';
+        foreach ($menu as $file => $label) {
+            if (!page_allowed($file)) continue;
+            echo '<a class="nav-link" href="' . e(base_url($file)) . '">' . e($label) . '</a>';
+        }
         echo '</nav></aside><main class="content"><header class="topbar"><div><h5 class="mb-0">' . e($title) . '</h5></div><div class="d-flex gap-2 align-items-center"><button class="btn btn-sm btn-outline-secondary" id="themeToggle">☾</button><span class="small">' . e($u['name']) . ' · ' . e(strtoupper($u['role'])) . '</span><a class="btn btn-sm btn-outline-danger" href="' . e(base_url('logout.php')) . '">Sair</a></div></header><div class="container-fluid py-3">';
         foreach (flashes() as $f) echo '<div class="alert alert-' . e($f['type']) . '">' . e($f['msg']) . '</div>';
     }

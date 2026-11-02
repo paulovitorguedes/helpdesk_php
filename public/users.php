@@ -4,10 +4,7 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/../src/layout.php';
 
-require_auth();
-if (!role_allowed(['admin'])) {
-    exit('Acesso negado.');
-}
+require_page_access('users.php');
 
 $pdo    = db();
 $eu     = auth_user();

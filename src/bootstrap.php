@@ -109,6 +109,31 @@ function role_allowed(array $roles): bool
     $u = auth_user();
     return $u && in_array($u['role'], $roles, true);
 }
+function page_allowed(string $page): bool
+{
+    $roles = match ($page) {
+        'dashboard.php', 'clients.php', 'materials.php',
+        'payables.php', 'receivables.php', 'receivable_report.php',
+        'receivable_report_wa.php', 'reports.php' => ['admin', 'financeiro'],
+        'tickets.php' => ['admin', 'tecnico'],
+        'users.php' => ['admin'],
+        default => [],
+    };
+
+    return role_allowed($roles);
+}
+function require_page_access(string $page): void
+{
+    require_auth();
+    if (!page_allowed($page)) {
+        http_response_code(403);
+        exit('Acesso negado.');
+    }
+}
+function auth_home_url(): string
+{
+    return base_url(role_allowed(['tecnico']) ? 'tickets.php' : 'dashboard.php');
+}
 function cycle_from_close_date(string $closeDate): array
 {
     $end = new DateTimeImmutable($closeDate);

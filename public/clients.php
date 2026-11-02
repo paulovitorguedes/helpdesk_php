@@ -2,7 +2,7 @@
 
 require_once __DIR__ . '/../src/layout.php';
 
-require_auth();
+require_page_access('clients.php');
 
 $pdo = db();
 
@@ -530,7 +530,8 @@ if (isset($_GET['delete'])) {
 
     if (
         !role_allowed([
-            'admin'
+            'admin',
+            'financeiro'
         ])
     ) {
 
