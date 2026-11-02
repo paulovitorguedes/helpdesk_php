@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../src/layout.php';
 
 require_page_access('clients.php');
+require_once __DIR__ . '/../src/client_form.php';
 
 $pdo = db();
 
@@ -19,124 +20,41 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     csrf_check();
 
 
-    /*
-    |--------------------------------------------------------------------------
-    | ID
-    |--------------------------------------------------------------------------
-    */
+    $id = (int)($_POST['id'] ?? 0);
+    $existingClient = null;
+    if ($id) {
+        $stmt = $pdo->prepare('SELECT * FROM clients WHERE id = ? AND deleted_at IS NULL');
+        $stmt->execute([$id]);
+        $existingClient = $stmt->fetch() ?: null;
+        if ($existingClient === null) {
+            flash('danger', 'Cliente não encontrado.');
+            redirect(base_url('clients.php'));
+        }
+    }
 
-    $id =
-        (int)($_POST['id'] ?? 0);
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | DADOS PRINCIPAIS
-    |--------------------------------------------------------------------------
-    */
-
-    $name =
-        trim(
-            $_POST['name']
-                ?? ''
-        );
-
-
-    $document =
-        trim(
-            $_POST['document']
-                ?? ''
-        );
-
-
-    $phone =
-        trim(
-            $_POST['phone']
-                ?? ''
-        );
-
-
-    $email =
-        trim(
-            $_POST['email']
-                ?? ''
-        );
-
-
-    $address =
-        trim(
-            $_POST['address']
-                ?? ''
-        );
-
-
-    $status =
-        $_POST['status']
-        ?? 'ativo';
-
-
-    $standardKm =
-        (float)str_replace(
-            ',',
-            '.',
-            $_POST['standard_km']
-                ?? 0
-        );
-
-
-    $hasContract =
-        isset(
-            $_POST['has_contract']
-        )
-        ? 1
-        : 0;
-
-
-    $monthlyFee =
-        (float)str_replace(
-            ',',
-            '.',
-            $_POST['monthly_fee']
-                ?? 0
-        );
-
-
-    $extraVisitFee =
-        (float)str_replace(
-            ',',
-            '.',
-            $_POST['extra_visit_fee']
-                ?? 0
-        );
-
-
-    $dueDay =
-        (int)(
-            $_POST['due_day']
-            ?? 20
-        );
-
-
-    $contractNotes =
-        trim(
-            $_POST['contract_notes']
-                ?? ''
-        );
-
-
-    $notes =
-        trim(
-            $_POST['notes']
-                ?? ''
-        );
-
-
-    /*
-    |--------------------------------------------------------------------------
-    | VALIDAR NOME
-    |--------------------------------------------------------------------------
-    */
-
+    $_SESSION['client_form_input'] = array_filter($_POST, static fn($value) => is_scalar($value));
+    $formResult = client_form_normalize($_POST, $existingClient);
+    if ($formResult['errors']) {
+        if (isset($formResult['errors']['contract_toggle'])) {
+            $_SESSION['client_form_input']['has_contract'] = '1';
+        }
+        foreach ($formResult['errors'] as $message) flash('danger', $message);
+        redirect(base_url($id ? 'clients.php?edit=' . $id : 'clients.php'));
+    }
+    $data = $formResult['data'];
+    $name = $data['name'];
+    $document = $data['document'];
+    $phone = $data['phone'];
+    $email = $data['email'];
+    $address = $data['address'];
+    $status = $data['status'];
+    $standardKm = $data['standard_km'];
+    $hasContract = $data['has_contract'];
+    $monthlyFee = $data['monthly_fee'];
+    $extraVisitFee = $data['extra_visit_fee'];
+    $dueDay = $data['due_day'];
+    $contractNotes = $data['contract_notes'];
+    $notes = $data['notes'];
     if ($name === '') {
 
         flash(
@@ -513,6 +431,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
 
+    unset($_SESSION['client_form_input']);
+
     redirect(
         base_url(
             'clients.php'
@@ -606,6 +526,13 @@ if (isset($_GET['edit'])) {
 }
 
 
+$isEditing = !empty($edit['id']);
+$previousInput = $_SESSION['client_form_input'] ?? null;
+unset($_SESSION['client_form_input']);
+if (is_array($previousInput) && (int)($previousInput['id'] ?? 0) === (int)($edit['id'] ?? 0)) {
+    $edit = array_replace($edit ?: [], $previousInput);
+    $edit['has_contract'] = isset($previousInput['has_contract']) ? 1 : 0;
+}
 /*
 |--------------------------------------------------------------------------
 | FILTROS
@@ -732,7 +659,7 @@ render_header(
                 <h5>
 
 
-                    <?= $edit
+                    <?= $isEditing
 
                         ? 'Editar cliente'
 
@@ -744,7 +671,7 @@ render_header(
                 </h5>
 
 
-                <form method="post">
+                <form method="post" id="client-form">
 
 
                     <!-- CSRF -->
@@ -814,6 +741,9 @@ render_header(
                         <input
                             class="form-control"
                             name="document"
+                            inputmode="numeric"
+                            maxlength="18"
+                            data-client-document
                             value="<?= e(
                                         $edit['document']
                                             ?? ''
@@ -840,6 +770,9 @@ render_header(
                         <input
                             class="form-control"
                             name="phone"
+                            inputmode="numeric"
+                            maxlength="40"
+                            data-client-phone
                             value="<?= e(
                                         $edit['phone']
                                             ?? ''
@@ -892,6 +825,7 @@ render_header(
                         <input
                             class="form-control"
                             name="address"
+                            required
                             value="<?= e(
                                         $edit['address']
                                             ?? ''
@@ -920,7 +854,8 @@ render_header(
 
                             <select
                                 class="form-select"
-                                name="status">
+                                name="status"
+                                required>
 
 
                                 <option
@@ -972,11 +907,10 @@ render_header(
                             <input
                                 class="form-control"
                                 name="standard_km"
+                                inputmode="decimal"
+                                data-client-km
                                 value="<?= e(
-                                            (string)(
-                                                $edit['standard_km']
-                                                ?? 0
-                                            )
+                                            client_form_display((string)($edit['standard_km'] ?? 0))
                                         ) ?>">
 
 
@@ -998,6 +932,8 @@ render_header(
                             type="checkbox"
                             name="has_contract"
                             id="has_contract"
+                            value="1"
+                            aria-controls="contract-fields"
                             <?= !empty($edit['has_contract'])
                                 ? 'checked'
                                 : ''
@@ -1016,119 +952,114 @@ render_header(
                     </div>
 
 
-                    <!-- ====================================================
+                    <div id="contract-toggle-error" class="alert alert-warning" role="alert" hidden></div>
+                    <div id="contract-fields" <?= empty($edit['has_contract']) ? 'hidden' : '' ?>>
+                        <!-- ====================================================
                          MENSALIDADE + VISITA
                     ===================================================== -->
 
-                    <div class="row">
+                        <div class="row">
 
 
-                        <div class="col">
+                            <div class="col">
 
 
-                            <label class="form-label">
+                                <label class="form-label">
 
-                                Mensalidade
+                                    Mensalidade
 
-                            </label>
-
-
-                            <input
-                                class="form-control"
-                                name="monthly_fee"
-                                value="<?= e(
-                                            (string)(
-                                                $edit['monthly_fee']
-                                                ?? 0
-                                            )
-                                        ) ?>">
+                                </label>
 
 
-                        </div>
+                                <div class="input-group"><span class="input-group-text">R$</span>
+                                    <input class="form-control" name="monthly_fee" inputmode="decimal" data-client-money data-contract-required
+                                        value="<?= e(client_form_display((string)($edit['monthly_fee'] ?? 0), true)) ?>" <?= !empty($edit['has_contract']) ? 'required' : '' ?>>
+                                </div>
 
 
-                        <div class="col">
+                            </div>
 
 
-                            <label class="form-label">
-
-                                Visita adicional
-
-                            </label>
+                            <div class="col">
 
 
-                            <input
-                                class="form-control"
-                                name="extra_visit_fee"
-                                value="<?= e(
-                                            (string)(
-                                                $edit['extra_visit_fee']
-                                                ?? 0
-                                            )
-                                        ) ?>">
+                                <label class="form-label">
+
+                                    Visita adicional
+
+                                </label>
+
+
+                                <div class="input-group"><span class="input-group-text">R$</span>
+                                    <input class="form-control" name="extra_visit_fee" inputmode="decimal" data-client-money data-contract-required
+                                        value="<?= e(client_form_display((string)($edit['extra_visit_fee'] ?? 0), true)) ?>" <?= !empty($edit['has_contract']) ? 'required' : '' ?>>
+                                </div>
+
+
+                            </div>
 
 
                         </div>
 
 
-                    </div>
-
-
-                    <!-- ====================================================
+                        <!-- ====================================================
                          DIA VENCIMENTO
                     ===================================================== -->
 
-                    <div class="mb-2">
+                        <div class="mb-2">
 
 
-                        <label class="form-label">
+                            <label class="form-label">
 
-                            Dia vencimento
+                                Dia vencimento
 
-                        </label>
-
-
-                        <input
-                            class="form-control"
-                            type="number"
-                            min="1"
-                            max="28"
-                            name="due_day"
-                            value="<?= e(
-                                        (string)(
-                                            $edit['due_day']
-                                            ?? 20
-                                        )
-                                    ) ?>">
+                            </label>
 
 
-                    </div>
+                            <?php $selectedDue = (string)($edit['due_day'] ?? ''); ?>
+                            <select class="form-select" name="due_day" id="client-due-day" data-contract-required
+                                <?= !empty($edit['has_contract']) ? 'required' : '' ?> aria-describedby="competence-cutoff">
+                                <option value="">Selecione</option>
+                                <?php if ($selectedDue !== '' && !in_array($selectedDue, ['10', '20'], true)): ?>
+                                    <option value="<?= e($selectedDue) ?>" selected>Dia <?= e($selectedDue) ?> — selecione 10 ou 20 para contrato</option>
+                                <?php endif; ?>
+                                <option value="10" <?= $selectedDue === '10' ? 'selected' : '' ?>>Dia 10</option>
+                                <option value="20" <?= $selectedDue === '20' ? 'selected' : '' ?>>Dia 20</option>
+                            </select>
+                            <div class="form-text" id="competence-cutoff" aria-live="polite"><?= $selectedDue === '10'
+                                                                                                    ? 'Virada da competência dia 05'
+                                                                                                    : ($selectedDue === '20' ? 'Virada da competência dia 15' : '') ?></div>
 
 
-                    <!-- ====================================================
+                        </div>
+
+
+                        <!-- ====================================================
                          OBSERVAÇÕES CONTRATO
                     ===================================================== -->
 
-                    <div class="mb-2">
+                        <div class="mb-2">
 
 
-                        <label class="form-label">
+                            <label class="form-label">
 
-                            Observações contrato
+                                Observações contrato
 
-                        </label>
+                            </label>
 
 
-                        <textarea
-                            class="form-control"
-                            name="contract_notes"><?= e(
-                                                        $edit['contract_notes']
-                                                            ?? ''
-                                                    ) ?></textarea>
+                            <textarea
+                                class="form-control"
+                                name="contract_notes"><?= e(
+                                                            $edit['contract_notes']
+                                                                ?? ''
+                                                        ) ?></textarea>
+
+
+                        </div>
 
 
                     </div>
-
 
                     <!-- ====================================================
                          OBSERVAÇÕES GERAIS
@@ -1159,7 +1090,7 @@ render_header(
                          BOTÕES
                     ===================================================== -->
 
-                    <?php if ($edit): ?>
+                    <?php if ($isEditing): ?>
 
 
                         <button
@@ -1481,4 +1412,5 @@ render_header(
 </div>
 
 
+<script src="<?= e(base_url('assets/js/clients.js') . '?v=' . filemtime(__DIR__ . '/assets/js/clients.js')) ?>"></script>
 <?php render_footer(); ?>
