@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/../src/layout.php';
+require_once __DIR__ . '/../src/material_rules.php';
 
 require_page_access('materials.php');
 
@@ -220,128 +221,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     */
 
     if ($action === 'delete') {
-
         $id = (int)($_POST['id'] ?? 0);
-
-        if (!$id) {
-
-            flash(
-                'danger',
-                'Material inválido.'
-            );
-
-            redirect(base_url('materials.php'));
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | VERIFICAR USO EM CHAMADOS
-        |--------------------------------------------------------------------------
-        */
-
-        $stmt = $pdo->prepare("
-            SELECT DISTINCT
-                t.ticket_number
-
-            FROM ticket_materials tm
-
-            INNER JOIN tickets t
-                ON t.id = tm.ticket_id
-
-            WHERE tm.material_id = ?
-
-            ORDER BY t.ticket_number
-        ");
-
-        $stmt->execute([$id]);
-
-        $ticketNumbers = $stmt->fetchAll(PDO::FETCH_COLUMN);
-
-
-        if (!empty($ticketNumbers)) {
-
-            flash(
-                'warning',
-                'Não é possível excluir este material, pois ele já está cadastrado '
-                    . (
-                        count($ticketNumbers) > 1
-                        ? 'nos chamados '
-                        : 'no chamado '
-                    )
-                    . implode(', ', $ticketNumbers)
-                    . '. A edição do material continua disponível.'
-            );
-
-            redirect(base_url('materials.php'));
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | EXCLUSÃO
-        |--------------------------------------------------------------------------
-        */
-
         try {
-
-            $pdo->beginTransaction();
-
-
-            $stmt = $pdo->prepare("
-                DELETE FROM stock_movements
-                WHERE material_id = ?
-            ");
-
-            $stmt->execute([$id]);
-
-
-            $stmt = $pdo->prepare("
-                DELETE FROM material_purchases
-                WHERE material_id = ?
-            ");
-
-            $stmt->execute([$id]);
-
-
-            $stmt = $pdo->prepare("
-                DELETE FROM materials
-                WHERE id = ?
-            ");
-
-            $stmt->execute([$id]);
-
-
-            $pdo->commit();
-
-
-            flash(
-                'success',
-                'Material excluído com sucesso.'
-            );
-        } catch (Throwable $e) {
-
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-
-            flash(
-                'danger',
-                'Não foi possível excluir o material: '
-                    . $e->getMessage()
-            );
+            if ($id <= 0) { throw new RuntimeException('Material inválido.'); }
+            material_delete_unused($pdo, $id);
+            flash('success', 'Material excluído com sucesso.');
+        } catch (Throwable $error) {
+            flash('warning', $error->getMessage());
         }
-
-
         redirect(base_url('materials.php'));
     }
 
-
-    /*
-    |--------------------------------------------------------------------------
-    | NOVA COMPRA DE MATERIAL EXISTENTE
-    |--------------------------------------------------------------------------
-    */
+    /* NOVA COMPRA DE MATERIAL EXISTENTE */
 
     if ($action === 'purchase') {
 
@@ -353,8 +244,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $supplier =
             trim($_POST['supplier'] ?? '');
 
-        $quantity =
-            decimalValue($_POST['quantity'] ?? 0);
+        try {
+            $purchaseDate = material_purchase_date($purchaseDate);
+            $quantity = material_whole_quantity($_POST['quantity'] ?? '', 'A quantidade comprada');
+        } catch (InvalidArgumentException $error) {
+            flash('danger', $error->getMessage());
+            redirect(base_url('materials.php?purchase=' . $materialId));
+        }
 
         $totalCost =
             decimalValue($_POST['total_cost'] ?? 0);
@@ -461,6 +357,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         try {
 
             $pdo->beginTransaction();
+            material_validate_next_purchase($pdo, $materialId, $purchaseDate);
 
 
             /*
@@ -570,10 +467,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $description =
         trim($_POST['description'] ?? '');
 
-    $minimumStock =
-        decimalValue(
-            $_POST['minimum_stock'] ?? 0
-        );
+    try {
+        $minimumStock = material_whole_quantity($_POST['minimum_stock'] ?? '0', 'O estoque mínimo', true);
+    } catch (InvalidArgumentException $error) {
+        flash('danger', $error->getMessage());
+        redirect(base_url($id ? 'materials.php?edit=' . $id : 'materials.php'));
+    }
 
     $notes =
         trim($_POST['notes'] ?? '');
@@ -655,8 +554,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $supplier =
         trim($_POST['supplier'] ?? '');
 
-    $quantity =
-        decimalValue($_POST['quantity'] ?? 0);
+    try {
+        $purchaseDate = material_purchase_date($purchaseDate);
+        $quantity = material_whole_quantity($_POST['quantity'] ?? '', 'A quantidade comprada');
+    } catch (InvalidArgumentException $error) {
+        flash('danger', $error->getMessage());
+        redirect(base_url('materials.php'));
+    }
 
     $totalCost =
         decimalValue($_POST['total_cost'] ?? 0);
@@ -1001,12 +905,7 @@ render_header('Materiais');
                                             </td>
 
                                             <td>
-                                                <?= number_format(
-                                                    (float)$purchase['quantity'],
-                                                    2,
-                                                    ',',
-                                                    '.'
-                                                ) ?>
+                                                <?= material_quantity_display($purchase['quantity']) ?>
                                             </td>
 
                                             <td>
@@ -1077,31 +976,16 @@ render_header('Materiais');
 
                                             $quantityText =
                                                 '+'
-                                                . number_format(
-                                                    $quantity,
-                                                    2,
-                                                    ',',
-                                                    '.'
-                                                );
+                                                . material_quantity_display($quantity);
                                         } elseif ($movement['movement_type'] === 'saida') {
 
                                             $quantityText =
                                                 '-'
-                                                . number_format(
-                                                    $quantity,
-                                                    2,
-                                                    ',',
-                                                    '.'
-                                                );
+                                                . material_quantity_display($quantity);
                                         } else {
 
                                             $quantityText =
-                                                number_format(
-                                                    $quantity,
-                                                    2,
-                                                    ',',
-                                                    '.'
-                                                );
+                                                material_quantity_display($quantity);
                                         }
 
                                         ?>
@@ -1260,8 +1144,8 @@ render_header('Materiais');
                                 id="quantity"
                                 name="quantity"
                                 type="number"
-                                step="0.01"
-                                min="0.01"
+                                step="1"
+                                min="1"
                                 required>
 
                         </div>
@@ -1275,14 +1159,19 @@ render_header('Materiais');
                                 Valor total pago
                             </label>
 
-                            <input
-                                class="form-control"
-                                id="total_cost"
-                                name="total_cost"
-                                type="number"
-                                step="0.01"
-                                min="0"
-                                required>
+                            <div class="input-group">
+                                <span class="input-group-text" id="total-cost-currency">R$</span>
+                                <input
+                                    class="form-control"
+                                    id="total_cost"
+                                    name="total_cost"
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    aria-label="Valor total pago em reais"
+                                    aria-describedby="total-cost-currency"
+                                    required>
+                            </div>
 
                         </div>
 
@@ -1414,11 +1303,10 @@ render_header('Materiais');
                                 class="form-control"
                                 name="minimum_stock"
                                 type="number"
-                                step="0.01"
+                                step="1"
                                 min="0"
                                 value="<?= e(
-                                            $editMaterial['minimum_stock']
-                                                ?? '0'
+                                            isset($editMaterial['minimum_stock']) ? (string)(float)$editMaterial['minimum_stock'] : '0'
                                         ) ?>">
 
                         </div>
@@ -1477,8 +1365,8 @@ render_header('Materiais');
                                     id="quantity"
                                     name="quantity"
                                     type="number"
-                                    step="0.01"
-                                    min="0.01"
+                                    step="1"
+                                min="1"
                                     required>
 
                             </div>
@@ -1490,14 +1378,19 @@ render_header('Materiais');
                                     Valor total pago
                                 </label>
 
-                                <input
-                                    class="form-control"
-                                    id="total_cost"
-                                    name="total_cost"
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
-                                    required>
+                                <div class="input-group">
+                                    <span class="input-group-text" id="total-cost-currency">R$</span>
+                                    <input
+                                        class="form-control"
+                                        id="total_cost"
+                                        name="total_cost"
+                                        type="number"
+                                        step="0.01"
+                                        min="0"
+                                        aria-label="Valor total pago em reais"
+                                        aria-describedby="total-cost-currency"
+                                        required>
+                                </div>
 
                             </div>
 
@@ -1726,12 +1619,7 @@ render_header('Materiais');
 
                                 <td>
 
-                                    <?= number_format(
-                                        $stock,
-                                        2,
-                                        ',',
-                                        '.'
-                                    ) ?>
+                                    <?= material_quantity_display($stock) ?>
 
                                 </td>
 

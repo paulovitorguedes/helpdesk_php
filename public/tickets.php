@@ -1,6 +1,7 @@
 <?php
 
 require_once __DIR__ . '/../src/layout.php';
+require_once __DIR__ . '/../src/material_rules.php';
 
 require_page_access('tickets.php');
 
@@ -161,11 +162,10 @@ function normalizePostedMaterials(
             );
 
 
-        $quantity =
-            decimalValue(
-                $postedMaterial['quantity']
-                    ?? 0
-            );
+        $rawQuantity = $postedMaterial['quantity'] ?? '';
+        $quantity = $rawQuantity === '' ? 0 : material_whole_quantity(
+            $rawQuantity, 'A quantidade vendida', true, 99999999
+        );
 
 
         $unitPrice =
@@ -4273,7 +4273,7 @@ render_header(
                                             class="form-control"
                                             type="number"
                                             min="0"
-                                            step="0.01"
+                                            step="1"
                                             name="materials[<?= $index ?>][quantity]"
                                             value="<?= e(
                                                         $formItem['quantity']
@@ -5175,7 +5175,7 @@ render_header(
                     class="form-control"
                     type="number"
                     min="0"
-                    step="0.01"
+                    step="1"
                     data-field="quantity">
 
             </div>
