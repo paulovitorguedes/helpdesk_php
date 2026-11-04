@@ -63,13 +63,22 @@ function material_delete_unused(PDO $pdo, int $materialId): void
     $pdo->beginTransaction();
     try {
         material_lock($pdo, $materialId);
-        foreach (['material_purchases', 'ticket_materials', 'stock_movements'] as $table) {
-            $statement = $pdo->prepare('SELECT COUNT(*) FROM ' . $table . ' WHERE material_id = ?');
+        $usageQueries = [
+            'SELECT COUNT(*) FROM ticket_materials WHERE material_id = ?',
+            "SELECT COUNT(*) FROM stock_movements WHERE material_id = ? AND (movement_type = 'saida' OR ticket_id IS NOT NULL)",
+        ];
+        foreach ($usageQueries as $query) {
+            $statement = $pdo->prepare($query);
             $statement->execute([$materialId]);
             if ((int)$statement->fetchColumn() > 0) {
-                throw new RuntimeException('Não é possível excluir este material: existe histórico de compras, uso em chamados ou movimentações de estoque. A edição cadastral continua disponível.');
+                throw new RuntimeException('Não é possível excluir este material: ele já possui venda ou uso registrado em chamado, mesmo que o item tenha sido removido ou devolvido.');
             }
         }
+        // Compra e entrada sem venda pertencem ao cadastro de teste que sera removido.
+        $statement = $pdo->prepare('DELETE FROM stock_movements WHERE material_id = ?');
+        $statement->execute([$materialId]);
+        $statement = $pdo->prepare('DELETE FROM material_purchases WHERE material_id = ?');
+        $statement->execute([$materialId]);
         $statement = $pdo->prepare('DELETE FROM materials WHERE id = ? AND deleted_at IS NULL');
         $statement->execute([$materialId]);
         $pdo->commit();

@@ -1672,7 +1672,7 @@ render_header('Materiais');
                                         style="display:inline"
                                         onsubmit="
                                             return confirm(
-                                                'Deseja realmente excluir este material?'
+                                                'Excluir este material e apagar suas compras e entradas de estoque? Esta ação é permitida somente se nunca houve venda ou uso em chamado.'
                                             );
                                         ">
 

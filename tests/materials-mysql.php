@@ -28,7 +28,7 @@ try {
     $pdo->exec('CREATE TABLE materials(id INT PRIMARY KEY,deleted_at DATETIME NULL) ENGINE=InnoDB');
     $pdo->exec('CREATE TABLE material_purchases(id INT AUTO_INCREMENT PRIMARY KEY,material_id INT NOT NULL,purchase_date DATE NOT NULL,FOREIGN KEY(material_id) REFERENCES materials(id)) ENGINE=InnoDB');
     $pdo->exec('CREATE TABLE ticket_materials(id INT PRIMARY KEY,material_id INT NOT NULL,FOREIGN KEY(material_id) REFERENCES materials(id)) ENGINE=InnoDB');
-    $pdo->exec('CREATE TABLE stock_movements(id INT PRIMARY KEY,material_id INT NOT NULL,FOREIGN KEY(material_id) REFERENCES materials(id)) ENGINE=InnoDB');
+    $pdo->exec('CREATE TABLE stock_movements(id INT PRIMARY KEY,material_id INT NOT NULL,movement_type VARCHAR(20),ticket_id INT NULL,FOREIGN KEY(material_id) REFERENCES materials(id)) ENGINE=InnoDB');
     $pdo->exec('INSERT INTO materials VALUES(1,NULL),(2,NULL),(3,NULL),(4,NULL)');
     $pdo->exec("INSERT INTO material_purchases(material_id,purchase_date) VALUES(1,'2026-10-20'),(2,'2026-10-10')");
     $pdo->beginTransaction();material_validate_next_purchase($pdo,1,'2026-10-20');$pdo->commit();$check(true,'MariaDB aceita compra na mesma data');
@@ -42,15 +42,18 @@ try {
         if(!file_exists($readyFile))throw new RuntimeException('Processo concorrente nao ficou pronto.');
         usleep(200000);
         $check(!file_exists($resultFile),'Operacao concorrente aguarda bloqueio: '.$label);
-        $pdo->exec($label==='purchase'?"INSERT INTO material_purchases(material_id,purchase_date) VALUES(1,'2026-10-22')":"INSERT INTO material_purchases(material_id,purchase_date) VALUES(3,'2026-10-22')");
+        $pdo->exec($label==='purchase'?"INSERT INTO material_purchases(material_id,purchase_date) VALUES(1,'2026-10-22')":"INSERT INTO stock_movements(id,material_id,movement_type,ticket_id) VALUES(1,3,'saida',1)");
         $pdo->commit();
         $workerExit=proc_close($child);$child=null;
         $check($workerExit===0&&file_exists($resultFile),'Processo concorrente conclui: '.$label);
         $result=json_decode(file_get_contents($resultFile),true,512,JSON_THROW_ON_ERROR);
-        $check(is_string($result['error'])&&str_contains($result['error'],$label==='purchase'?'anterior':'histórico'),'Revalidacao apos desbloqueio: '.$label);
+        $check(is_string($result['error'])&&str_contains($result['error'],$label==='purchase'?'anterior':'venda'),'Revalidacao apos desbloqueio: '.$label);
         $check(!$pdo->inTransaction(),'Transacao principal finalizada: '.$label);
     }
-    $check((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=3')->fetchColumn()===1,'Exclusao concorrente preserva material que acabou de receber compra');
+    $check((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=3')->fetchColumn()===1,'Exclusao concorrente preserva material que acabou de ter saida');
+    material_delete_unused($pdo,2);
+    $check((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=2')->fetchColumn()===0,'MariaDB exclui material com compra e sem venda');
+    $check((int)$pdo->query('SELECT COUNT(*) FROM material_purchases WHERE material_id=2')->fetchColumn()===0,'MariaDB apaga compras vinculadas sem violar FK');
     material_delete_unused($pdo,4);
     $check((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=4')->fetchColumn()===0,'MariaDB exclui cadastro sem historico');
     $report=['checks'=>$checks,'failures'=>$failures,'scope'=>'MariaDB 10.4.32 novo e isolado, porta 13308, dados sinteticos; locks reais de InnoDB em dois processos. Nenhuma configuracao ou banco de producao utilizado.'];

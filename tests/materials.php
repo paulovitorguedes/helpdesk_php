@@ -121,7 +121,16 @@ try {
     foreach([['quantity'=>'0.5'],['quantity'=>'-1'],['purchase_date'=>'2026-02-30'],['material_id'=>'9999999'],['purchase_notes'=>'falha simulada','purchase_date'=>'2026-10-22']] as $changes){$before=inventorySnapshot();postPurchase($changes);checkMaterial(inventorySnapshot()===$before,'Nova compra invalida/falha nao deixa registros parciais: '.json_encode($changes));}
     $before=inventorySnapshot();postMaterial(['id'=>'1','minimum_stock'=>'2.5']);checkMaterial(inventorySnapshot()===$before,'Edicao recusa minimo fracionado sem alterar compra');
     postMaterial(['id'=>'1','description'=>'Material A atualizado','minimum_stock'=>'2']);checkMaterial((int)$pdo->query('SELECT minimum_stock FROM materials WHERE id=1')->fetchColumn()===2,'Edicao cadastral com historico permitida');
-    foreach([1,4,5] as $material){$before=inventorySnapshot();postMaterial(['action'=>'delete','id'=>(string)$material]);checkMaterial(inventorySnapshot()===$before,'Preservar material/historico '.$material);}
+    $before=inventorySnapshot();postMaterial(['action'=>'delete','id'=>'4']);checkMaterial(inventorySnapshot()===$before,'Uso em chamado protege o material');
+    postMaterial(['action'=>'delete','id'=>'2'],'financeiro');
+    checkMaterial((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=2')->fetchColumn()===0,'Compra sem venda permite excluir material');
+    checkMaterial((int)$pdo->query('SELECT COUNT(*) FROM material_purchases WHERE material_id=2')->fetchColumn()===0,'Compras do material excluido apagadas');
+    checkMaterial((int)$pdo->query('SELECT COUNT(*) FROM stock_movements WHERE material_id=2')->fetchColumn()===0,'Entradas do material excluido apagadas');
+    postMaterial(['action'=>'delete','id'=>'5']);checkMaterial((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=5')->fetchColumn()===0,'Movimento sem venda nem chamado nao impede excluir');
+    $pdo->exec("INSERT INTO materials(id,description) VALUES(20,'Falha ao excluir'); INSERT INTO material_purchases(material_id,purchase_date,quantity,total_cost,unit_cost,notes) VALUES(20,'2026-10-20',1,100,100,'falha exclusao'); INSERT INTO stock_movements(material_id,movement_type,quantity,created_by) VALUES(20,'entrada',1,999999); CREATE TRIGGER fail_delete_purchase BEFORE DELETE ON material_purchases WHEN OLD.notes='falha exclusao' BEGIN SELECT RAISE(ABORT,'Falha simulada de exclusao'); END;");
+    $before=inventorySnapshot();postMaterial(['action'=>'delete','id'=>'20']);checkMaterial(inventorySnapshot()===$before,'Falha ao apagar compra restaura entradas e cadastro');
+    $pdo->exec("INSERT INTO materials(id,description) VALUES(21,'Venda removida e devolvida'); INSERT INTO stock_movements(material_id,movement_type,quantity,created_by) VALUES(21,'saida',1,999999),(21,'entrada',1,999999)");
+    $before=inventorySnapshot();postMaterial(['action'=>'delete','id'=>'21']);checkMaterial(inventorySnapshot()===$before,'Historico de saida protege mesmo sem item atual e com saldo devolvido');
     postMaterial(['action'=>'delete','id'=>'3']);checkMaterial((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=3')->fetchColumn()===0,'Cadastro sem historico pode ser excluido');
     $before=inventorySnapshot();postMaterial(['action'=>'delete','id'=>'3']);checkMaterial(inventorySnapshot()===$before,'Exclusao repetida nao afeta outros cadastros');
     $before=inventorySnapshot();postPurchase([], 'tecnico');checkMaterial(inventorySnapshot()===$before,'Tecnico nao compra por POST');
