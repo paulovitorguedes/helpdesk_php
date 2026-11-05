@@ -54,4 +54,4 @@ $before=inventorySnapshot();materialHttp('materials.php',$stale);checkMaterial(i
 purchaseEdit(['last_purchase_quantity'=>'3']);checkMaterial((int)latestTestPurchase()['quantity']===3,'Saida anterior a ultima entrada nao bloqueia compra nova');
 $pdo->exec('UPDATE stock_movements SET quantity=99 WHERE purchase_id=102');
 $before=inventorySnapshot();purchaseEdit(['last_purchase_quantity'=>'4']);checkMaterial(inventorySnapshot()===$before,'Entrada inconsistente bloqueia correcao numerica');
-checkMaterial(json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables')->fetchAll()])===$financialBefore,'Edicao isolada nao altera contas financeiras existentes');
+checkMaterial(json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables WHERE material_purchase_id IS NULL')->fetchAll()])===$financialBefore,'Edicao isolada nao altera contas financeiras existentes');

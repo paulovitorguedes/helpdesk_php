@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../src/layout.php';
 
 require_page_access('payables.php');
+require_once __DIR__ . '/../src/material_rules.php';
 
 $pdo = db();
 
@@ -124,14 +125,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect($returnUrl);
         }
 
-        $stmt = $pdo->prepare("
-            DELETE FROM payables
-            WHERE id = ?
-        ");
-
-        $stmt->execute([
-            $payableId
-        ]);
+        try {
+            payable_delete($pdo, $payableId);
+        } catch (Throwable $error) {
+            if ($error instanceof PDOException) { error_log($error->getMessage()); }
+            flash('warning', $error instanceof PDOException ? 'Não foi possível excluir a conta.' : $error->getMessage());
+            redirect($returnUrl);
+        }
 
         flash(
             'success',
@@ -233,7 +233,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         redirect($returnUrl);
     }
 
-    if ($totalAmount <= 0) {
+    $linkedAccount = null;
+    if ($payableId > 0) {
+        $probe = $pdo->prepare('SELECT material_purchase_id FROM payables WHERE id = ?');
+        $probe->execute([$payableId]);
+        $linkedAccount = $probe->fetchColumn();
+    }
+    if ($totalAmount < 0 || ($totalAmount == 0 && !$linkedAccount)) {
 
         flash(
             'danger',
@@ -294,35 +300,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect($returnUrl);
         }
 
-        $stmt = $pdo->prepare("
-            UPDATE payables
-            SET
-                due_date = ?,
-                description = ?,
-                category = ?,
-                supplier = ?,
-                total_amount = ?,
-                payment_method = ?,
-                installments = ?,
-                current_installment = ?,
-                installment_value = ?,
-                notes = ?
-            WHERE id = ?
-        ");
-
-        $stmt->execute([
-            $dueDate,
-            $description,
-            $category,
-            $supplier,
-            $totalAmount,
-            $paymentMethod,
-            $installments,
-            $currentInstallment,
-            $installmentValue,
-            $notes,
-            $payableId
-        ]);
+        try {
+            payable_update_configuration($pdo, $payableId, [
+                'due_date'=>$dueDate, 'description'=>$description, 'category'=>$category,
+                'supplier'=>$supplier, 'total_amount'=>$_POST['total_amount'] ?? '', 'payment_method'=>$_POST['payment_method'] ?? '',
+                'installments'=>$_POST['installments'] ?? '', 'current_installment'=>$_POST['current_installment'] ?? '',
+                'installment_value'=>$installmentValue, 'notes'=>$notes,
+            ], (string)($_POST['linked_revision'] ?? ''));
+        } catch (Throwable $error) {
+            if ($error instanceof PDOException) { error_log($error->getMessage()); }
+            flash('warning', $error instanceof PDOException ? 'Não foi possível atualizar a conta. Nenhuma alteração parcial foi mantida.' : $error->getMessage());
+            redirect($returnUrl . '&edit_id=' . $payableId);
+        }
 
         flash(
             'success',
@@ -439,6 +428,7 @@ $referenceDate = new DateTimeImmutable(
 $yearRows = $pdo->query("
     SELECT DISTINCT YEAR(due_date) AS year_value
     FROM payables
+    WHERE configuration_pending = 0 AND due_date IS NOT NULL
     ORDER BY year_value
 ")->fetchAll();
 
@@ -479,15 +469,22 @@ sort($availableYears);
 */
 
 $allRows = $pdo->query("
-    SELECT *
-    FROM payables
-    ORDER BY due_date, id
+    SELECT p.*, mp.total_cost AS purchase_total, m.description AS material_description
+    FROM payables p
+    LEFT JOIN material_purchases mp ON mp.id = p.material_purchase_id
+    LEFT JOIN materials m ON m.id = mp.material_id
+    ORDER BY p.due_date, p.id
 ")->fetchAll();
 
 $rows = [];
+$unconfiguredRows = [];
 $totalToPay = 0.0;
 
 foreach ($allRows as $row) {
+    if ((int)$row['configuration_pending'] === 1 || $row['due_date'] === null) {
+        $unconfiguredRows[] = $row;
+        continue;
+    }
 
     $due = new DateTimeImmutable($row['due_date']);
 
@@ -605,9 +602,11 @@ $editing = null;
 if ($editId > 0) {
 
     $stmt = $pdo->prepare("
-        SELECT *
-        FROM payables
-        WHERE id = ?
+        SELECT p.*, mp.total_cost AS purchase_total, m.description AS material_description
+        FROM payables p
+        LEFT JOIN material_purchases mp ON mp.id = p.material_purchase_id
+        LEFT JOIN materials m ON m.id = mp.material_id
+        WHERE p.id = ?
         LIMIT 1
     ");
 
@@ -660,6 +659,14 @@ render_header(
                 <form
                     method="post"
                     id="payableForm">
+                    <?php if ($editing && $editing['material_purchase_id'] !== null): ?>
+                        <input type="hidden" name="linked_revision" value="<?= e(purchase_payable_revision($editing)) ?>">
+                        <div class="alert alert-info">Compra de <?= e($editing['material_description']) ?> — valor da compra: <?= money($editing['purchase_total']) ?>.
+                        <?php if ((int)$editing['configuration_pending'] === 1): ?> Revise vencimento, forma e parcelas para incluir esta conta nas despesas mensais.<?php endif; ?></div>
+                        <?php if ((int)$editing['total_manually_changed'] === 1 && (float)$editing['total_amount'] !== (float)$editing['purchase_total']): ?>
+                            <div class="alert alert-warning">O total financeiro foi alterado manualmente e difere da compra. Ele será preservado nas correções da compra.</div>
+                        <?php endif; ?>
+                    <?php endif; ?>
 
                     <input
                         type="hidden"
@@ -756,7 +763,7 @@ render_header(
                             type="number"
                             name="total_amount"
                             id="total_amount"
-                            min="0.01"
+                            min="0"
                             step="0.01"
                             value="<?= e(
                                         $editing
@@ -783,10 +790,11 @@ render_header(
                             class="form-select"
                             name="payment_method">
 
+                            <option value="" <?= $editing && $editing['payment_method'] === null ? 'selected' : '' ?>>Selecione</option>
                             <option
                                 value="pix"
                                 <?= (
-                                    ($editing['payment_method'] ?? 'pix')
+                                    ($editing ? ($editing['payment_method'] ?? '') : 'pix')
                                     ===
                                     'pix'
                                 )
@@ -799,7 +807,7 @@ render_header(
                             <option
                                 value="debito"
                                 <?= (
-                                    ($editing['payment_method'] ?? 'pix')
+                                    ($editing ? ($editing['payment_method'] ?? '') : 'pix')
                                     ===
                                     'debito'
                                 )
@@ -812,7 +820,7 @@ render_header(
                             <option
                                 value="credito"
                                 <?= (
-                                    ($editing['payment_method'] ?? 'pix')
+                                    ($editing ? ($editing['payment_method'] ?? '') : 'pix')
                                     ===
                                     'credito'
                                 )
@@ -825,7 +833,7 @@ render_header(
                             <option
                                 value="dinheiro"
                                 <?= (
-                                    ($editing['payment_method'] ?? 'pix')
+                                    ($editing ? ($editing['payment_method'] ?? '') : 'pix')
                                     ===
                                     'dinheiro'
                                 )
@@ -838,7 +846,7 @@ render_header(
                             <option
                                 value="boleto"
                                 <?= (
-                                    ($editing['payment_method'] ?? 'pix')
+                                    ($editing ? ($editing['payment_method'] ?? '') : 'pix')
                                     ===
                                     'boleto'
                                 )
@@ -851,7 +859,7 @@ render_header(
                             <option
                                 value="transferencia"
                                 <?= (
-                                    ($editing['payment_method'] ?? 'pix')
+                                    ($editing ? ($editing['payment_method'] ?? '') : 'pix')
                                     ===
                                     'transferencia'
                                 )
@@ -879,7 +887,7 @@ render_header(
                                 type="number"
                                 name="installments"
                                 id="installments"
-                                value="<?= $editing ? (int)$editing['installments'] : 1 ?>"
+                                value="<?= $editing ? e($editing['installments'] === null ? '' : (string)(int)$editing['installments']) : 1 ?>"
                                 min="1"
                                 required>
 
@@ -897,7 +905,7 @@ render_header(
                                 type="number"
                                 name="current_installment"
                                 id="current_installment"
-                                value="<?= $editing ? (int)$editing['current_installment'] : 1 ?>"
+                                value="<?= $editing ? e($editing['current_installment'] === null ? '' : (string)(int)$editing['current_installment']) : 1 ?>"
                                 min="1"
                                 required>
 
@@ -917,16 +925,16 @@ render_header(
                             type="number"
                             name="installment_value"
                             id="installment_value"
-                            min="0.01"
+                            min="0"
                             step="0.01"
                             value="<?= e(
                                         $editing
-                                            ? number_format(
+                                            ? ($editing['installment_value'] === null ? '' : number_format(
                                                 (float)$editing['installment_value'],
                                                 2,
                                                 '.',
                                                 ''
-                                            )
+                                            ))
                                             : ''
                                     ) ?>">
 
@@ -980,6 +988,7 @@ render_header(
                             </div>
 
 
+                            <?php if ($editing['material_purchase_id'] === null): ?>
                             <button
                                 class="btn btn-danger"
                                 type="submit"
@@ -989,6 +998,7 @@ render_header(
                                 data-confirm="Confirma a exclusão desta conta a pagar?">
                                 Excluir
                             </button>
+                            <?php endif; ?>
 
                         </div>
 
@@ -1141,6 +1151,25 @@ render_header(
         </div>
 
 
+        <?php if ($unconfiguredRows): ?>
+        <section class="card mb-3" aria-labelledby="pending-payables-title">
+            <div class="card-body">
+                <h5 id="pending-payables-title">A configurar <span class="badge text-bg-secondary"><?= count($unconfiguredRows) ?></span></h5>
+                <p class="text-body-secondary small">Estas contas não entram nas despesas mensais até a revisão do vencimento, forma de pagamento e parcelas.</p>
+                <div class="table-responsive"><table class="table align-middle" id="unconfiguredPayables">
+                    <thead><tr><th>Descrição</th><th>Fornecedor</th><th>Total</th><th>Ações</th></tr></thead>
+                    <tbody><?php foreach ($unconfiguredRows as $pending): ?>
+                        <tr><td><?= e($pending['description']) ?>
+                            <?php if ($pending['material_purchase_id'] !== null): ?><div class="small text-body-secondary">Compra de <?= e($pending['material_description']) ?></div><?php endif; ?>
+                            <?php if ((int)$pending['total_manually_changed'] === 1 && (float)$pending['total_amount'] !== (float)$pending['purchase_total']): ?><div class="small text-warning-emphasis">Total manual diferente da compra.</div><?php endif; ?>
+                        </td><td><?= e($pending['supplier']) ?></td><td><?= money($pending['total_amount']) ?></td>
+                        <td><a class="btn btn-sm btn-outline-primary" href="<?= e(base_url('payables.php') . '?month=' . $selectedMonth . '&year=' . $selectedYear . '&edit_id=' . (int)$pending['id']) ?>">Configurar</a></td></tr>
+                    <?php endforeach; ?></tbody>
+                </table></div>
+            </div>
+        </section>
+        <?php endif; ?>
+
         <input
             class="form-control mb-2"
             placeholder="Pesquisa instantânea"
@@ -1192,6 +1221,9 @@ render_header(
                                     <?= e(
                                         $r['description']
                                     ) ?>
+                                    <?php if ((int)$r['total_manually_changed'] === 1 && $r['material_purchase_id'] !== null && (float)$r['total_amount'] !== (float)$r['purchase_total']): ?>
+                                        <div class="small text-warning-emphasis">Total manual diferente da compra.</div>
+                                    <?php endif; ?>
                                 </td>
 
                                 <td>

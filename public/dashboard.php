@@ -155,6 +155,7 @@ $payables =
             current_installment,
             installment_value
         FROM payables
+        WHERE configuration_pending = 0 AND due_date IS NOT NULL
     ")
     ->fetchAll();
 

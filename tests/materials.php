@@ -37,8 +37,8 @@ CREATE TABLE ticket_daily_sequences(sequence_date TEXT PRIMARY KEY,last_number I
 CREATE TABLE receivables(id INTEGER PRIMARY KEY,monthly_fee NUMERIC,services_amount NUMERIC,materials_amount NUMERIC,extra_visits_amount NUMERIC,previous_balance NUMERIC,advances_amount NUMERIC,discount_amount NUMERIC,total_amount NUMERIC,paid_amount NUMERIC,status TEXT);
 INSERT INTO receivables VALUES(1,500,0,0,0,0,0,0,500,500,'pago');
 CREATE TABLE ticket_billing_installments(id INTEGER PRIMARY KEY AUTOINCREMENT,ticket_id INTEGER,charge_type TEXT,installment_number INTEGER,installment_count INTEGER,due_date TEXT,amount NUMERIC,receivable_id INTEGER);
-CREATE TABLE payables(id INTEGER PRIMARY KEY,description TEXT,total_amount NUMERIC);
-INSERT INTO payables VALUES(1,'Obrigacao ficticia preservada',100);
+CREATE TABLE payables(id INTEGER PRIMARY KEY,description TEXT,total_amount NUMERIC, supplier TEXT,category TEXT,notes TEXT,due_date TEXT,payment_method TEXT,installments INTEGER,current_installment INTEGER,installment_value NUMERIC,status TEXT NOT NULL DEFAULT 'pendente',paid_at TEXT,material_purchase_id INTEGER UNIQUE REFERENCES material_purchases(id),configuration_pending INTEGER NOT NULL DEFAULT 0,total_manually_changed INTEGER NOT NULL DEFAULT 0);
+INSERT INTO payables(id,description,total_amount,due_date,payment_method,installments,current_installment,installment_value) VALUES(1,'Obrigacao ficticia preservada',100,'2026-11-20','pix',1,1,100);
 INSERT INTO materials(id,description,minimum_stock) VALUES(1,'Material A',1),(2,'Material B',0),(3,'Cadastro sem historico',0),(4,'Material com uso legado',0),(5,'Movimento sem compra legado',0);
 INSERT INTO material_purchases(id,material_id,purchase_date,quantity,total_cost,unit_cost) VALUES(1,1,'2026-10-20',5,250,50),(2,2,'2026-10-10',2,20,10);
 INSERT INTO stock_movements(material_id,movement_type,quantity,purchase_id,reference,created_by) VALUES(1,'entrada',5,1,'Compra ficticia',999999),(2,'entrada',2,2,'Compra ficticia',999999),(5,'ajuste',1,NULL,'Historico excepcional preservado',999999);
@@ -47,7 +47,7 @@ INSERT INTO ticket_materials(ticket_id,material_id,description,quantity,unit_pri
 CREATE TRIGGER fail_stock BEFORE INSERT ON stock_movements WHEN NEW.notes='falha simulada' BEGIN SELECT RAISE(ABORT,'Falha simulada ao gravar movimento'); END;
 SQL;
 $pdo->exec($schema);
-$financialBefore=json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables')->fetchAll()]);
+$financialBefore=json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables WHERE material_purchase_id IS NULL')->fetchAll()]);
 session_save_path($root.'/sessions');
 $cookies=[];
 foreach(['admin','financeiro','tecnico'] as $role) {
@@ -77,7 +77,7 @@ function materialHttp(string $path,?array $post=null,string $role='admin',array 
     preg_match('/^HTTP\/\S+\s+(\d+)/',$http_response_header[0]??'',$match);
     return ['status'=>(int)($match[1]??0),'body'=>(string)$body,'headers'=>$http_response_header];
 }
-function inventorySnapshot():string {global $pdo;$result=[];foreach(['materials','material_purchases','stock_movements','tickets','ticket_materials','ticket_billing_installments','ticket_daily_sequences'] as $table)$result[$table]=$pdo->query('SELECT * FROM '.$table)->fetchAll();return json_encode($result);}
+function inventorySnapshot():string {global $pdo;$result=[];foreach(['materials','material_purchases','stock_movements','tickets','ticket_materials','ticket_billing_installments','ticket_daily_sequences','payables'] as $table)$result[$table]=$pdo->query('SELECT * FROM '.$table)->fetchAll();return json_encode($result);}
 function postMaterial(array $changes=[],string $role='admin'):array {
     return materialHttp('materials.php',array_replace(['csrf'=>'material-test-csrf','action'=>'save','id'=>'','description'=>'Material novo ficticio','minimum_stock'=>'0','purchase_date'=>'2026-10-20','supplier'=>'Fornecedor ficticio','quantity'=>'2','total_cost'=>'100','notes'=>''],$changes),$role);
 }
@@ -158,7 +158,7 @@ try {
     }
     $before=inventorySnapshot();postTicket(['materials'=>[['material_id'=>'1','quantity'=>'999','unit_price'=>'0']]]);checkMaterial(inventorySnapshot()===$before,'Estoque insuficiente nao cria chamado/baixa/parcela');
     checkMaterial((int)$pdo->query('SELECT COUNT(*) FROM stock_movements WHERE quantity <> CAST(quantity AS INTEGER)')->fetchColumn()===0,'Movimentos novos e ajustes sao inteiros');
-    checkMaterial(json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables')->fetchAll()])===$financialBefore,'Recebiveis e pagaveis preexistentes intactos nesta subentrega');
+    checkMaterial(json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables WHERE material_purchase_id IS NULL')->fetchAll()])===$financialBefore,'Recebiveis e pagaveis preexistentes intactos nesta subentrega');
     $before=inventorySnapshot();$sessionBefore=materialHttp('__test_flash')['body'];
     $blocked=materialHttp('materials.php?edit=4',['csrf'=>'material-test-csrf','action'=>'delete','id'=>'4'],'admin',['Accept: application/json']);
     $blockedJson=json_decode($blocked['body'],true);
@@ -175,6 +175,7 @@ try {
     checkMaterial($invalidCsrf['status']===419&&inventorySnapshot()===$before,'JSON continua sujeito ao CSRF');
     require __DIR__ . '/materials-purchase-edit-cases.php';
     require __DIR__ . '/materials-purchase-feedback-cases.php';
+    require __DIR__ . '/purchase-payables-cases.php';
     $report=['checks'=>$checks,'failures'=>$failures,'test_directory'=>$root,'scope'=>'Paginas reais via HTTP; SQLite sintetico; sem configuracao ou banco reais. FOR UPDATE removido somente pelo adaptador SQLite de teste; concorrencia MariaDB nao validada por esta suite.'];
     $evidence=$argv[1]??($root.'/evidencias');if(!is_dir($evidence))throw new RuntimeException('Pasta de evidencia inexistente.');
     file_put_contents($evidence.'/resultado-materiais.json',json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n");

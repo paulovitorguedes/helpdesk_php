@@ -19,6 +19,12 @@ function material_purchase_revision(array $purchase): string
 
 function material_purchase_edit_block(PDO $pdo, array $purchase): ?string
 {
+    $payment = $pdo->prepare('SELECT status, paid_at FROM payables WHERE material_purchase_id = ?');
+    $payment->execute([(int)$purchase['id']]);
+    $account = $payment->fetch(PDO::FETCH_ASSOC);
+    if ($account && purchase_payable_paid($account)) {
+        return 'Data, quantidade e valor estão protegidos: já existe pagamento registrado na conta vinculada, mesmo que parcial.';
+    }
     $statement = $pdo->prepare('SELECT id, movement_type, quantity, ticket_id FROM stock_movements WHERE purchase_id = ? ORDER BY id');
     $statement->execute([(int)$purchase['id']]);
     $entries = $statement->fetchAll(PDO::FETCH_ASSOC);
@@ -43,7 +49,7 @@ function material_purchase_edit_total(mixed $raw): string
     return number_format((float)str_replace(',', '.', trim($raw)), 2, '.', '');
 }
 
-function material_update_latest_purchase(PDO $pdo, int $materialId, array $input): void
+function material_update_latest_purchase(PDO $pdo, int $materialId, array $input): bool
 {
     $pdo->beginTransaction();
     try {
@@ -64,6 +70,7 @@ function material_update_latest_purchase(PDO $pdo, int $materialId, array $input
         $amountChanged = $quantity !== (int)$purchase['quantity'] || (float)$total !== (float)$purchase['total_cost'];
         $changed = $date !== $purchase['purchase_date'] || $amountChanged;
         if ($changed) {
+            purchase_payable_for_update($pdo, (int)$purchase['id']);
             $blocked = material_purchase_edit_block($pdo, $purchase);
             if ($blocked !== null) { throw new RuntimeException($blocked); }
             $statement = $pdo->prepare('SELECT MAX(purchase_date) FROM material_purchases WHERE material_id = ? AND id <> ?');
@@ -88,7 +95,12 @@ function material_update_latest_purchase(PDO $pdo, int $materialId, array $input
             $statement = $pdo->prepare("UPDATE stock_movements SET quantity = ? WHERE material_id = ? AND purchase_id = ? AND movement_type = 'entrada' AND ticket_id IS NULL");
             $statement->execute([$quantity, $materialId, (int)$purchase['id']]);
         }
+        $difference = false;
+        if ((float)$total !== (float)$purchase['total_cost']) {
+            $difference = purchase_payable_sync($pdo, (int)$purchase['id'], (float)$total);
+        }
         $pdo->commit();
+        return $difference;
     } catch (Throwable $error) {
         if ($pdo->inTransaction()) { $pdo->rollBack(); }
         throw $error;

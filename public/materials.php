@@ -370,6 +370,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ]);
 
 
+            purchase_payable_create($pdo, $materialId, $purchaseId, $supplier, $totalCost);
             $pdo->commit();
 
 
@@ -463,7 +464,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
         if (isset($_POST['edit_last_purchase'])) {
             try {
-                material_update_latest_purchase($pdo, $id, $_POST);
+                $difference = material_update_latest_purchase($pdo, $id, $_POST);
+                if ($difference) { flash('warning', 'O valor manual da conta a pagar foi mantido. Confira a diferença em Contas a Pagar.'); }
                 flash('success', 'Material e última compra atualizados com sucesso.');
                 redirect(base_url('materials.php'));
             } catch (Throwable $error) {
@@ -673,7 +675,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         ]);
 
 
-        $pdo->commit();
+        purchase_payable_create($pdo, $materialId, $purchaseId, $supplier, $totalCost);
+            $pdo->commit();
 
 
         flash(
@@ -1291,7 +1294,7 @@ render_header('Materiais');
                         <?php if ($editPurchase): ?>
                             <hr>
                             <h6 class="mb-3">Última compra</h6>
-                            <p class="small text-body-secondary">Alterações nesta compra não atualizam contas a pagar cadastradas manualmente.</p>
+                            <p class="small text-body-secondary">Novas compras geram conta a pagar a configurar. Contas manuais antigas não são vinculadas automaticamente.</p>
                             <input type="hidden" name="edit_last_purchase" value="1">
                             <input type="hidden" name="last_purchase_id" value="<?= (int)$editPurchase['id'] ?>">
                             <input type="hidden" name="last_purchase_revision" value="<?= e(material_purchase_revision($editPurchase)) ?>">

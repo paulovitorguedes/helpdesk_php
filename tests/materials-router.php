@@ -7,6 +7,8 @@ class MaterialTestPDO extends PDO
     public function __construct() {
         parent::__construct('sqlite:' . getenv('HELPDESK_MATERIAL_TEST_DB'), null, null, [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
         $this->exec('PRAGMA foreign_keys=ON');
+        $this->sqliteCreateFunction('YEAR', static fn($date) => $date === null ? null : (int)substr($date,0,4), 1);
+        $this->sqliteCreateFunction('MONTH', static fn($date) => $date === null ? null : (int)substr($date,5,2), 1);
     }
     public function prepare(string $query, array $options=[]): PDOStatement|false {
         return parent::prepare(preg_replace('/\s+FOR UPDATE\b/i', '', $query), $options);

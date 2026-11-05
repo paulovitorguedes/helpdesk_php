@@ -31,6 +31,7 @@ try {
     $pdo->exec('CREATE TABLE material_purchases(id INT AUTO_INCREMENT PRIMARY KEY,material_id INT NOT NULL,purchase_date DATE NOT NULL,FOREIGN KEY(material_id) REFERENCES materials(id)) ENGINE=InnoDB');
     $pdo->exec('CREATE TABLE ticket_materials(id INT PRIMARY KEY,material_id INT NOT NULL,FOREIGN KEY(material_id) REFERENCES materials(id)) ENGINE=InnoDB');
     $pdo->exec('CREATE TABLE stock_movements(id INT PRIMARY KEY,material_id INT NOT NULL,movement_type VARCHAR(20),ticket_id INT NULL,FOREIGN KEY(material_id) REFERENCES materials(id)) ENGINE=InnoDB');
+    $pdo->exec("CREATE TABLE payables(id INT AUTO_INCREMENT PRIMARY KEY, description VARCHAR(190) NOT NULL DEFAULT '', supplier VARCHAR(190), category VARCHAR(120), notes TEXT, total_amount DECIMAL(12,2) NOT NULL DEFAULT 0, due_date DATE NULL, payment_method VARCHAR(20), installments INT, current_installment INT, installment_value DECIMAL(12,2), status VARCHAR(20) NOT NULL DEFAULT 'pendente', paid_at DATE NULL, material_purchase_id INT NULL UNIQUE, configuration_pending TINYINT NOT NULL DEFAULT 0, total_manually_changed TINYINT NOT NULL DEFAULT 0) ENGINE=InnoDB");
     $pdo->exec('INSERT INTO materials VALUES(1,NULL),(2,NULL),(3,NULL),(4,NULL)');
     $pdo->exec("INSERT INTO material_purchases(material_id,purchase_date) VALUES(1,'2026-10-20'),(2,'2026-10-10')");
     $pdo->beginTransaction();material_validate_next_purchase($pdo,1,'2026-10-20');$pdo->commit();$check(true,'MariaDB aceita compra na mesma data');

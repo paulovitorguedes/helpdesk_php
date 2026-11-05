@@ -1,5 +1,6 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . '/purchase_payables.php';
 
 function material_quantity_display(float|int|string $quantity): string
 {
@@ -74,6 +75,7 @@ function material_delete_unused(PDO $pdo, int $materialId): void
                 throw new RuntimeException('Não é possível excluir este material: ele já possui venda ou uso registrado em chamado, mesmo que o item tenha sido removido ou devolvido.');
             }
         }
+        purchase_payables_delete_for_material($pdo, $materialId);
         // Compra e entrada sem venda pertencem ao cadastro de teste que sera removido.
         $statement = $pdo->prepare('DELETE FROM stock_movements WHERE material_id = ?');
         $statement->execute([$materialId]);
