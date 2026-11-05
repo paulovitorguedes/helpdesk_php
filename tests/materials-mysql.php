@@ -2,6 +2,7 @@
 declare(strict_types=1);
 if (PHP_SAPI !== 'cli' || getenv('HELPDESK_MATERIAL_MYSQL_TEST_PORT') !== '13308') { exit(1); }
 require_once dirname(__DIR__) . '/src/material_rules.php';
+require_once dirname(__DIR__) . '/src/material_purchase_edit.php';
 $pdo=new PDO('mysql:host=127.0.0.1;port=13308;charset=utf8mb4','root','',[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
 $pdo->exec('SET SESSION innodb_lock_wait_timeout=5');
 $testFolder=getenv('HELPDESK_MATERIAL_MYSQL_TEST_FOLDER');
@@ -9,12 +10,13 @@ if(!$testFolder || !is_dir($testFolder))throw new RuntimeException('Diretorio ex
 if(($argv[1]??'')==='--worker') {
     $pdo->exec('USE helpdesk_material_rules_test');
     $label=$argv[2]??'';
-    if(!in_array($label,['purchase','delete'],true))exit(1);
+    if(!in_array($label,['purchase','delete','edit-sale','edit-new'],true))exit(1);
     file_put_contents($testFolder.'/'.$label.'-ready','ready');
     $error=null;
     try {
         if($label==='purchase') {$pdo->beginTransaction();material_validate_next_purchase($pdo,1,'2026-10-21');$pdo->commit();}
-        else {material_delete_unused($pdo,3);}
+        elseif($label==='delete') {material_delete_unused($pdo,3);}
+        else {material_update_latest_purchase($pdo,10,json_decode(file_get_contents($testFolder.'/'.$label.'-input.json'),true,512,JSON_THROW_ON_ERROR));}
     } catch(Throwable $exception) {if($pdo->inTransaction())$pdo->rollBack();$error=$exception->getMessage();}
     file_put_contents($testFolder.'/'.$label.'-result.json',json_encode(['error'=>$error],JSON_UNESCAPED_UNICODE));
     exit;
@@ -56,6 +58,7 @@ try {
     $check((int)$pdo->query('SELECT COUNT(*) FROM material_purchases WHERE material_id=2')->fetchColumn()===0,'MariaDB apaga compras vinculadas sem violar FK');
     material_delete_unused($pdo,4);
     $check((int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=4')->fetchColumn()===0,'MariaDB exclui cadastro sem historico');
+    require __DIR__.'/materials-purchase-edit-mysql-cases.php';
     $report=['checks'=>$checks,'failures'=>$failures,'scope'=>'MariaDB 10.4.32 novo e isolado, porta 13308, dados sinteticos; locks reais de InnoDB em dois processos. Nenhuma configuracao ou banco de producao utilizado.'];
     file_put_contents($testFolder.'/resultado-concorrencia.json',json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n");
     echo json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n";

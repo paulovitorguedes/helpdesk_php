@@ -2,9 +2,10 @@
 declare(strict_types=1);
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 require_once dirname(__DIR__) . '/src/material_rules.php';
+require_once dirname(__DIR__) . '/src/material_purchase_edit.php';
 $application=dirname(__DIR__);
 $root=sys_get_temp_dir().'/helpdesk-materials-'.bin2hex(random_bytes(8));
-foreach(['source/src','source/public','source/config','sessions','evidencias'] as $folder) {
+foreach(['source/src','source/public/assets/js','source/public/assets/css','source/config','sessions','evidencias'] as $folder) {
     if(!mkdir($root.'/'.$folder,0700,true) && !is_dir($root.'/'.$folder)) throw new RuntimeException('Falha ao preparar teste.');
 }
 foreach(['src','public'] as $folder) {
@@ -13,6 +14,7 @@ foreach(['src','public'] as $folder) {
     }
 }
 // Nunca ler/copiar config/config.php ou conectar no servidor/banco reais.
+foreach(['js','css'] as $assetFolder){foreach(glob($application.'/public/assets/'.$assetFolder.'/*') as $asset){if(is_file($asset))copy($asset,$root.'/source/public/assets/'.$assetFolder.'/'.basename($asset));}}
 file_put_contents($root.'/source/config/config.php',"<?php return ['app_name'=>'Teste de Materiais','base_url'=>''];\n");
 $bootstrap=file_get_contents($root.'/source/src/bootstrap.php');
 $bootstrap=preg_replace_callback('/^function db\(\): PDO\r?\n\{.*?^\}/ms',static fn()=> 'function db(): PDO { static $pdo=null; return $pdo ??= new MaterialTestPDO(); }',$bootstrap,1,$replacements);
@@ -59,19 +61,21 @@ $address=stream_socket_get_name($socket,false);fclose($socket);$port=(int)substr
 $environment=getenv();
 $environment['HELPDESK_MATERIAL_TEST_DB']=$database;
 $environment['HELPDESK_MATERIAL_TEST_SESSIONS']=$root.'/sessions';
+$environment['HELPDESK_MATERIAL_TEST_PREVIEW']=($argv[1]??'')==='--serve'?'1':'0';
 $process=proc_open([PHP_BINARY,'-S','127.0.0.1:'.$port,'-t',$root.'/source/public',__DIR__.'/materials-router.php'],[0=>['pipe','r'],1=>['file',$root.'/evidencias/server.log','a'],2=>['file',$root.'/evidencias/server.log','a']],$pipes,$root,$environment,['bypass_shell'=>true,'create_new_console'=>false]);
 if(!is_resource($process)) throw new RuntimeException('Servidor isolado nao iniciou.');
 fclose($pipes[0]);
 $checks=0;$failures=[];
 function checkMaterial(bool $condition,string $label):void {global $checks,$failures;$checks++;if(!$condition)$failures[]=$label;}
-function materialHttp(string $path,?array $post=null,string $role='admin'):array {
+function materialHttp(string $path,?array $post=null,string $role='admin',array $extraHeaders=[]):array {
     global $port,$cookies;
     $headers='Cookie: '.$cookies[$role]."\r\n";
+    foreach($extraHeaders as $extraHeader)$headers.=$extraHeader."\r\n";
     if($post!==null)$headers.="Content-Type: application/x-www-form-urlencoded\r\n";
     $context=stream_context_create(['http'=>['method'=>$post===null?'GET':'POST','header'=>$headers,'content'=>$post===null?null:http_build_query($post),'ignore_errors'=>true,'follow_location'=>0,'timeout'=>5]]);
     $body=file_get_contents('http://127.0.0.1:'.$port.'/'.$path,false,$context);
     preg_match('/^HTTP\/\S+\s+(\d+)/',$http_response_header[0]??'',$match);
-    return ['status'=>(int)($match[1]??0),'body'=>(string)$body];
+    return ['status'=>(int)($match[1]??0),'body'=>(string)$body,'headers'=>$http_response_header];
 }
 function inventorySnapshot():string {global $pdo;$result=[];foreach(['materials','material_purchases','stock_movements','tickets','ticket_materials','ticket_billing_installments','ticket_daily_sequences'] as $table)$result[$table]=$pdo->query('SELECT * FROM '.$table)->fetchAll();return json_encode($result);}
 function postMaterial(array $changes=[],string $role='admin'):array {
@@ -91,6 +95,10 @@ try {
     $ready=false;
     for($i=0;$i<50;$i++){$connection=@stream_socket_client('tcp://127.0.0.1:'.$port,$errno,$error,0.1);if($connection){fclose($connection);$ready=true;break;}usleep(100000);}
     if(!$ready)throw new RuntimeException('Servidor de teste nao ficou disponivel.');
+    if(($argv[1]??'')==='--serve'){
+        echo json_encode(['preview_url'=>'http://127.0.0.1:'.$port.'/__test_login','test_directory'=>$root,'stop_file'=>$root.'/stop','scope'=>'SQLite ficticio; sem dados de producao'])."\n";flush();
+        $deadline=time()+1800;while(!file_exists($root.'/stop')&&time()<$deadline)usleep(200000);
+    }else{
     foreach(['1'=>1,'2.00'=>2,'2,00'=>2,'0003'=>3] as $raw=>$expected)checkMaterial(material_whole_quantity((string)$raw,'Quantidade')===$expected,'Inteiro valido '.$raw);
     foreach(['1.5','2,5','-1','0','1e3','1abc','99999999999',[]] as $invalid){try{material_whole_quantity($invalid,'Quantidade');checkMaterial(false,'Recusar quantidade invalida');}catch(InvalidArgumentException){checkMaterial(true,'Recusar quantidade invalida');}}
     checkMaterial(material_whole_quantity('0','Minimo',true)===0,'Minimo zero');
@@ -151,9 +159,26 @@ try {
     $before=inventorySnapshot();postTicket(['materials'=>[['material_id'=>'1','quantity'=>'999','unit_price'=>'0']]]);checkMaterial(inventorySnapshot()===$before,'Estoque insuficiente nao cria chamado/baixa/parcela');
     checkMaterial((int)$pdo->query('SELECT COUNT(*) FROM stock_movements WHERE quantity <> CAST(quantity AS INTEGER)')->fetchColumn()===0,'Movimentos novos e ajustes sao inteiros');
     checkMaterial(json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables')->fetchAll()])===$financialBefore,'Recebiveis e pagaveis preexistentes intactos nesta subentrega');
+    $before=inventorySnapshot();$sessionBefore=materialHttp('__test_flash')['body'];
+    $blocked=materialHttp('materials.php?edit=4',['csrf'=>'material-test-csrf','action'=>'delete','id'=>'4'],'admin',['Accept: application/json']);
+    $blockedJson=json_decode($blocked['body'],true);
+    checkMaterial($blocked['status']===409&&($blockedJson['ok']??null)===false,'Exclusao bloqueada responde JSON sem sair do modo editar');
+    checkMaterial(str_contains($blockedJson['message']??'','venda ou uso'),'JSON informa motivo do bloqueio');
+    checkMaterial(!array_filter($blocked['headers'],static fn($header)=>str_starts_with(strtolower($header),'location:')),'Bloqueio JSON nao envia redirecionamento');
+    checkMaterial(inventorySnapshot()===$before,'Bloqueio JSON preserva todos os dados');
+    checkMaterial(materialHttp('__test_flash')['body']===$sessionBefore,'Bloqueio JSON nao deixa flash para reaparecer em outra tela');
+    $pdo->exec("INSERT INTO materials(id,description) VALUES(22,'Cadastro AJAX ficticio')");
+    $deleted=materialHttp('materials.php',['csrf'=>'material-test-csrf','action'=>'delete','id'=>'22'],'financeiro',['Accept: application/json']);$deletedJson=json_decode($deleted['body'],true);
+    checkMaterial($deleted['status']===200&&($deletedJson['ok']??false)===true&&(int)$pdo->query('SELECT COUNT(*) FROM materials WHERE id=22')->fetchColumn()===0,'Exclusao JSON elegivel executada pelo Financeiro');
+    checkMaterial(($deletedJson['redirect']??'')==='/materials.php','Sucesso fornece destino da listagem');
+    $before=inventorySnapshot();$invalidCsrf=materialHttp('materials.php',['csrf'=>'invalido','action'=>'delete','id'=>'4'],'admin',['Accept: application/json']);
+    checkMaterial($invalidCsrf['status']===419&&inventorySnapshot()===$before,'JSON continua sujeito ao CSRF');
+    require __DIR__ . '/materials-purchase-edit-cases.php';
+    require __DIR__ . '/materials-purchase-feedback-cases.php';
     $report=['checks'=>$checks,'failures'=>$failures,'test_directory'=>$root,'scope'=>'Paginas reais via HTTP; SQLite sintetico; sem configuracao ou banco reais. FOR UPDATE removido somente pelo adaptador SQLite de teste; concorrencia MariaDB nao validada por esta suite.'];
     $evidence=$argv[1]??($root.'/evidencias');if(!is_dir($evidence))throw new RuntimeException('Pasta de evidencia inexistente.');
     file_put_contents($evidence.'/resultado-materiais.json',json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n");
     echo json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n";
+    }
 } finally {proc_terminate($process);proc_close($process);}
 exit($failures?1:0);

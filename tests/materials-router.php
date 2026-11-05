@@ -12,6 +12,11 @@ class MaterialTestPDO extends PDO
         return parent::prepare(preg_replace('/\s+FOR UPDATE\b/i', '', $query), $options);
     }
 }
+if (getenv('HELPDESK_MATERIAL_TEST_PREVIEW') === '1' && parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/__test_login') {
+    session_start();
+    $_SESSION=['user'=>['id'=>999999,'name'=>'Pessoa de teste','email'=>'teste@example.invalid','role'=>'admin'],'csrf'=>'material-test-csrf'];
+    header('Location: /materials.php?edit=4');exit;
+}
 if (parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH) === '/__test_flash') {
     session_start();
     header('Content-Type: application/json');

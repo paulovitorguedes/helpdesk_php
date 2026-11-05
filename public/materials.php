@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/../src/layout.php';
 require_once __DIR__ . '/../src/material_rules.php';
+require_once __DIR__ . '/../src/material_purchase_edit.php';
 
 require_page_access('materials.php');
 
@@ -30,6 +31,8 @@ function decimalValue($value): float
 */
 
 $editMaterial = null;
+$editPurchase = null;
+$editPurchaseBlock = null;
 
 if (isset($_GET['edit'])) {
 
@@ -49,6 +52,10 @@ if (isset($_GET['edit'])) {
     $stmt->execute([$editId]);
 
     $editMaterial = $stmt->fetch();
+    if ($editMaterial) {
+        $editPurchase = material_latest_purchase($pdo, $editId);
+        if ($editPurchase) { $editPurchaseBlock = material_purchase_edit_block($pdo, $editPurchase); }
+    }
 
     if (!$editMaterial) {
 
@@ -222,11 +229,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if ($action === 'delete') {
         $id = (int)($_POST['id'] ?? 0);
+        $jsonResponse = str_contains($_SERVER['HTTP_ACCEPT'] ?? '', 'application/json');
         try {
             if ($id <= 0) { throw new RuntimeException('Material inválido.'); }
             material_delete_unused($pdo, $id);
+            if ($jsonResponse) {
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(['ok' => true, 'message' => 'Material excluído com sucesso.', 'redirect' => base_url('materials.php')]);
+                exit;
+            }
             flash('success', 'Material excluído com sucesso.');
         } catch (Throwable $error) {
+            if ($jsonResponse) {
+                http_response_code($error instanceof PDOException ? 500 : 409);
+                header('Content-Type: application/json; charset=utf-8');
+                $message = $error instanceof PDOException
+                    ? 'Não foi possível excluir o material. Nenhuma exclusão parcial foi mantida.'
+                    : $error->getMessage();
+                if ($error instanceof PDOException) { error_log($error->getMessage()); }
+                echo json_encode(['ok' => false, 'message' => $message]);
+                exit;
+            }
             flash('warning', $error->getMessage());
         }
         redirect(base_url('materials.php'));
@@ -237,113 +260,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     if ($action === 'purchase') {
 
         $materialId = (int)($_POST['material_id'] ?? 0);
-
-        $purchaseDate =
-            $_POST['purchase_date'] ?? '';
-
-        $supplier =
-            trim($_POST['supplier'] ?? '');
-
+        $jsonPurchase = str_contains($_SERVER['HTTP_ACCEPT'] ?? '', 'application/json');
+        $rejectPurchase = static function (string $message, int $status = 422) use ($materialId, $jsonPurchase): never {
+            if ($jsonPurchase) {
+                http_response_code($status);
+                header('Content-Type: application/json; charset=utf-8');
+                echo json_encode(['ok' => false, 'message' => $message]);
+                exit;
+            }
+            flash('danger', $message);
+            redirect(base_url('materials.php?purchase=' . $materialId));
+        };
         try {
-            $purchaseDate = material_purchase_date($purchaseDate);
+            $purchaseDate = material_purchase_date($_POST['purchase_date'] ?? '');
             $quantity = material_whole_quantity($_POST['quantity'] ?? '', 'A quantidade comprada');
         } catch (InvalidArgumentException $error) {
-            flash('danger', $error->getMessage());
-            redirect(base_url('materials.php?purchase=' . $materialId));
+            $rejectPurchase($error->getMessage());
         }
-
-        $totalCost =
-            decimalValue($_POST['total_cost'] ?? 0);
-
-        $notes =
-            trim($_POST['purchase_notes'] ?? '');
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | VALIDAR MATERIAL
-        |--------------------------------------------------------------------------
-        */
-
-        $stmt = $pdo->prepare("
-            SELECT id
-            FROM materials
-            WHERE id = ?
-              AND deleted_at IS NULL
-        ");
-
+        $supplier = trim($_POST['supplier'] ?? '');
+        $totalCost = decimalValue($_POST['total_cost'] ?? 0);
+        $notes = trim($_POST['purchase_notes'] ?? '');
+        $stmt = $pdo->prepare('SELECT id FROM materials WHERE id = ? AND deleted_at IS NULL');
         $stmt->execute([$materialId]);
-
-        if (!$stmt->fetchColumn()) {
-
-            flash(
-                'danger',
-                'Material não encontrado.'
-            );
-
-            redirect(base_url('materials.php'));
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | VALIDAÇÕES DA COMPRA
-        |--------------------------------------------------------------------------
-        */
-
-        if (!$purchaseDate) {
-
-            flash(
-                'danger',
-                'Informe a data da compra.'
-            );
-
-            redirect(
-                base_url(
-                    'materials.php?purchase='
-                        . $materialId
-                )
-            );
-        }
-
-
-        if ($quantity <= 0) {
-
-            flash(
-                'danger',
-                'A quantidade comprada deve ser maior que zero.'
-            );
-
-            redirect(
-                base_url(
-                    'materials.php?purchase='
-                        . $materialId
-                )
-            );
-        }
-
-
-        if ($totalCost < 0) {
-
-            flash(
-                'danger',
-                'O valor total pago não pode ser negativo.'
-            );
-
-            redirect(
-                base_url(
-                    'materials.php?purchase='
-                        . $materialId
-                )
-            );
-        }
-
-
-        /*
-        |--------------------------------------------------------------------------
-        | VALOR UNITÁRIO
-        |--------------------------------------------------------------------------
-        */
+        if (!$stmt->fetchColumn()) { $rejectPurchase('Material não encontrado.', 404); }
+        if ($totalCost < 0) { $rejectPurchase('O valor total pago não pode ser negativo.'); }
 
         $unitCost = $totalCost / $quantity;
 
@@ -443,14 +383,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $pdo->rollBack();
             }
 
-            flash(
-                'danger',
-                'Erro ao registrar nova compra: '
-                    . $e->getMessage()
+            if ($e instanceof PDOException) { error_log($e->getMessage()); }
+            $rejectPurchase(
+                $e instanceof PDOException
+                    ? 'Não foi possível registrar a compra. Nenhuma alteração parcial foi mantida.'
+                    : 'Erro ao registrar nova compra: ' . $e->getMessage(),
+                $e instanceof PDOException ? 500 : 409
             );
         }
 
 
+        if ($jsonPurchase) {
+            header('Content-Type: application/json; charset=utf-8');
+            echo json_encode(['ok' => true, 'redirect' => base_url('materials.php')]);
+            exit;
+        }
         redirect(base_url('materials.php'));
     }
 
@@ -513,6 +460,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     */
 
     if ($id) {
+
+        if (isset($_POST['edit_last_purchase'])) {
+            try {
+                material_update_latest_purchase($pdo, $id, $_POST);
+                flash('success', 'Material e última compra atualizados com sucesso.');
+                redirect(base_url('materials.php'));
+            } catch (Throwable $error) {
+                if ($error instanceof PDOException) { error_log($error->getMessage()); }
+                flash('warning', $error instanceof PDOException ? 'Não foi possível salvar. Nenhuma alteração parcial foi mantida.' : $error->getMessage());
+                redirect(base_url('materials.php?edit=' . $id));
+            }
+        }
 
         $stmt = $pdo->prepare("
             UPDATE materials
@@ -754,6 +713,7 @@ $rows = $pdo->query("
         m.minimum_stock,
         m.notes,
 
+        mp.supplier AS last_supplier,
         mp.purchase_date,
         mp.total_cost,
         mp.unit_cost,
@@ -813,6 +773,7 @@ $rows = $pdo->query("
         m.minimum_stock,
         m.notes,
 
+        mp.supplier,
         mp.purchase_date,
         mp.total_cost,
         mp.unit_cost
@@ -827,7 +788,19 @@ $rows = $pdo->query("
 render_header('Materiais');
 
 ?>
+<link rel="stylesheet" href="<?= e(base_url('assets/css/materials-actions.css') . '?v=' . filemtime(__DIR__ . '/assets/css/materials-actions.css')) ?>">
+<?php
 
+?>
+
+
+<div id="material-delete-feedback" class="alert alert-warning position-fixed bottom-0 end-0 m-3 shadow"
+    style="z-index:1080;max-width:min(32rem,calc(100vw - 2rem))" role="alert" aria-live="polite" hidden>
+    <div class="d-flex align-items-start gap-3">
+        <span data-delete-message></span>
+        <button type="button" class="btn-close" aria-label="Fechar mensagem" data-delete-dismiss></button>
+    </div>
+</div>
 
 <div class="row g-3">
 
@@ -1075,7 +1048,8 @@ render_header('Materiais');
                     </div>
 
 
-                    <form method="post">
+                    <form method="post" data-material-purchase>
+                        <div class="alert alert-danger" data-purchase-feedback role="alert" tabindex="-1" hidden></div>
 
 
                         <input
@@ -1314,6 +1288,42 @@ render_header('Materiais');
 
                         <!-- COMPRA INICIAL -->
 
+                        <?php if ($editPurchase): ?>
+                            <hr>
+                            <h6 class="mb-3">Última compra</h6>
+                            <p class="small text-body-secondary">Alterações nesta compra não atualizam contas a pagar cadastradas manualmente.</p>
+                            <input type="hidden" name="edit_last_purchase" value="1">
+                            <input type="hidden" name="last_purchase_id" value="<?= (int)$editPurchase['id'] ?>">
+                            <input type="hidden" name="last_purchase_revision" value="<?= e(material_purchase_revision($editPurchase)) ?>">
+                            <?php if ($editPurchaseBlock): ?>
+                                <div class="alert alert-warning" role="status"><?= e($editPurchaseBlock) ?> Fornecedor e observações continuam editáveis.</div>
+                            <?php endif; ?>
+                            <div class="mb-3">
+                                <label class="form-label" for="last_purchase_date">Data da compra conforme a NF</label>
+                                <input class="form-control" id="last_purchase_date" name="last_purchase_date" type="date" value="<?= e($editPurchase['purchase_date']) ?>" required <?= $editPurchaseBlock ? 'readonly' : '' ?>>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="last_purchase_supplier">Fornecedor / local</label>
+                                <input class="form-control" id="last_purchase_supplier" name="last_purchase_supplier" maxlength="190" value="<?= e($editPurchase['supplier']) ?>">
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="quantity">Quantidade comprada</label>
+                                <input class="form-control" id="quantity" name="last_purchase_quantity" type="number" step="1" min="1" value="<?= e((string)(float)$editPurchase['quantity']) ?>" required <?= $editPurchaseBlock ? 'readonly' : '' ?>>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="total_cost">Valor total da compra (R$)</label>
+                                <input class="form-control" id="total_cost" name="last_purchase_total_cost" type="number" step="0.01" min="0" value="<?= e(number_format((float)$editPurchase['total_cost'], 2, '.', '')) ?>" required <?= $editPurchaseBlock ? 'readonly' : '' ?>>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="unit_cost_preview">Valor unitário calculado</label>
+                                <input class="form-control" id="unit_cost_preview" value="<?= money($editPurchase['unit_cost']) ?>" readonly>
+                            </div>
+                            <div class="mb-3">
+                                <label class="form-label" for="last_purchase_notes">Observações da compra</label>
+                                <textarea class="form-control" id="last_purchase_notes" name="last_purchase_notes" rows="2"><?= e($editPurchase['notes']) ?></textarea>
+                            </div>
+                        <?php endif; ?>
+
                         <?php if (!$editMaterial): ?>
 
 
@@ -1506,6 +1516,8 @@ render_header('Materiais');
 
                             <th>Estoque</th>
 
+                            <th><abbr title="Estoque mínimo" class="text-decoration-none">Est. mín.</abbr></th>
+                            <th>Fornecedor</th>
                             <th>Ações</th>
 
                         </tr>
@@ -1624,7 +1636,16 @@ render_header('Materiais');
                                 </td>
 
 
-                                <td class="text-nowrap">
+                                <td><?= material_quantity_display($minimum) ?></td>
+                                <td class="material-supplier"><?= trim((string)($r['last_supplier'] ?? '')) !== '' ? e($r['last_supplier']) : '—' ?></td>
+
+                                <td class="material-actions-cell">
+                                    <button type="button" class="btn btn-sm btn-outline-secondary material-actions-toggle"
+                                        data-material-actions aria-haspopup="menu" aria-expanded="false"
+                                        aria-controls="material-actions-<?= (int)$r['id'] ?>" aria-label="<?= e('Ações de ' . $r['description']) ?>">
+                                        <span aria-hidden="true">⋮</span>
+                                    </button>
+                                    <div id="material-actions-<?= (int)$r['id'] ?>" class="dropdown-menu material-actions-menu" role="menu" hidden>
 
 
                                     <!-- EDITAR -->
@@ -1636,7 +1657,7 @@ render_header('Materiais');
                                                             . $r['id']
                                                     )
                                                 ) ?>"
-                                        class="btn btn-sm btn-outline-primary">
+                                        class="dropdown-item" role="menuitem">
                                         Editar
                                     </a>
 
@@ -1650,7 +1671,7 @@ render_header('Materiais');
                                                             . $r['id']
                                                     )
                                                 ) ?>"
-                                        class="btn btn-sm btn-outline-success">
+                                        class="dropdown-item" role="menuitem">
                                         Nova compra
                                     </a>
 
@@ -1661,7 +1682,7 @@ render_header('Materiais');
                                                             . $r['id']
                                                     )
                                                 ) ?>"
-                                        class="btn btn-sm btn-outline-info">
+                                        class="dropdown-item" role="menuitem">
                                         Histórico
                                     </a>
 
@@ -1669,7 +1690,8 @@ render_header('Materiais');
 
                                     <form
                                         method="post"
-                                        style="display:inline"
+                                        class="m-0"
+                                        data-material-delete
                                         onsubmit="
                                             return confirm(
                                                 'Excluir este material e apagar suas compras e entradas de estoque? Esta ação é permitida somente se nunca houve venda ou uso em chamado.'
@@ -1698,7 +1720,7 @@ render_header('Materiais');
 
                                         <button
                                             type="submit"
-                                            class="btn btn-sm btn-outline-danger">
+                                            class="dropdown-item text-danger" role="menuitem">
                                             Excluir
                                         </button>
 
@@ -1706,6 +1728,7 @@ render_header('Materiais');
                                     </form>
 
 
+                                    </div>
                                 </td>
 
 
@@ -1811,4 +1834,7 @@ render_header('Materiais');
 </script>
 
 
+<script src="<?= e(base_url('assets/js/materials-delete.js') . '?v=' . filemtime(__DIR__ . '/assets/js/materials-delete.js')) ?>"></script>
+<script src="<?= e(base_url('assets/js/materials-purchase.js') . '?v=' . filemtime(__DIR__ . '/assets/js/materials-purchase.js')) ?>"></script>
+<script src="<?= e(base_url('assets/js/materials-actions.js') . '?v=' . filemtime(__DIR__ . '/assets/js/materials-actions.js')) ?>"></script>
 <?php render_footer(); ?>

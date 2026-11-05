@@ -1,0 +1,12 @@
+.material-actions-cell { width: 3rem; white-space: nowrap; }
+.material-actions-toggle { width: 2rem; height: 2rem; padding: 0; font-size: 1.35rem; line-height: 1; }
+.material-actions-menu { position: fixed; z-index: 1070; min-width: 10rem; margin: 0; }
+.material-actions-menu[hidden] { display: none !important; }
+.material-actions-menu:not([hidden]) { display: block; }
+.material-supplier { max-width: 12rem; overflow-wrap: anywhere; }
+#materialsTable td:nth-child(1),
+#materialsTable td:nth-child(3),
+#materialsTable td:nth-child(4),
+#materialsTable td:nth-child(5),
+#materialsTable td:nth-child(6),
+#materialsTable th:nth-child(6) { white-space: nowrap; }
