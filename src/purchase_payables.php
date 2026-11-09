@@ -1,9 +1,10 @@
 <?php
 declare(strict_types=1);
+require_once __DIR__ . '/payable_payments.php';
 
 function purchase_payable_paid(array $account): bool
 {
-    return $account['status'] === 'pago' || !empty($account['paid_at']);
+    return (int)($account['payment_history_locked'] ?? 0) === 1 || $account['status'] === 'pago' || !empty($account['paid_at']);
 }
 
 function purchase_payable_create(PDO $pdo, int $materialId, int $purchaseId, string $supplier, float $total): void
@@ -56,7 +57,7 @@ function purchase_payables_delete_for_material(PDO $pdo, int $materialId): void
 function purchase_payable_revision(array $account): string
 {
     $values = [];
-    foreach (['id','material_purchase_id','description','supplier','category','total_amount','due_date','payment_method','installments','current_installment','installment_value','configuration_pending','total_manually_changed','paid_at','status','notes'] as $key) {
+    foreach (['id','material_purchase_id','description','supplier','category','total_amount','due_date','payment_method','installments','current_installment','installment_value','configuration_pending','total_manually_changed','payment_history_locked','paid_at','status','notes'] as $key) {
         $values[$key] = (string)($account[$key] ?? '');
     }
     return hash('sha256', json_encode($values, JSON_THROW_ON_ERROR));
@@ -80,6 +81,7 @@ function payable_delete(PDO $pdo, int $accountId): void
     $pdo->beginTransaction();
     try {
         $account = payable_lock($pdo, $accountId);
+        if (purchase_payable_paid($account)) { throw new RuntimeException('Conta protegida: há registro de pagamento no histórico, inclusive se estornado.'); }
         if ($account['material_purchase_id'] !== null) { throw new RuntimeException('Conta vinculada a compra de material não pode ser excluída separadamente.'); }
         $statement = $pdo->prepare('DELETE FROM payables WHERE id = ?');
         $statement->execute([$accountId]);
@@ -108,10 +110,22 @@ function payable_update_configuration(PDO $pdo, int $accountId, array $values, s
         if ($values['installments'] < 1 || $values['current_installment'] < 1 || $values['current_installment'] > $values['installments']) {
             throw new InvalidArgumentException('Informe parcelas válidas.');
         }
+        $locked = purchase_payable_paid($account);
+        if ($locked) {
+            foreach (['due_date','payment_method'] as $field) {
+                if ((string)$values[$field] !== (string)$account[$field]) { throw new RuntimeException('Total, vencimentos e parcelamento estão protegidos após o primeiro pagamento, inclusive se estornado.'); }
+            }
+            foreach (['installments','current_installment'] as $field) {
+                if ((int)$values[$field] !== (int)$account[$field]) { throw new RuntimeException('Total, vencimentos e parcelamento estão protegidos após o primeiro pagamento, inclusive se estornado.'); }
+            }
+            foreach (['total_amount','installment_value'] as $field) {
+                if (payable_cents((string)$values[$field]) !== payable_cents((string)$account[$field])) { throw new RuntimeException('Total, vencimentos e parcelamento estão protegidos após o primeiro pagamento, inclusive se estornado.'); }
+            }
+        }
         $manual = (int)$account['total_manually_changed'];
         if ($account['material_purchase_id'] !== null && (float)$account['total_amount'] !== (float)$values['total_amount']) { $manual = 1; }
-        $statement = $pdo->prepare('UPDATE payables SET due_date=?, description=?, category=?, supplier=?, total_amount=?, payment_method=?, installments=?, current_installment=?, installment_value=?, notes=?, configuration_pending=0, total_manually_changed=? WHERE id=?');
-        $statement->execute([$values['due_date'],$values['description'],$values['category'],$values['supplier'],$values['total_amount'],$values['payment_method'],$values['installments'],$values['current_installment'],$values['installment_value'],$values['notes'],$manual,$accountId]);
+        $statement = $pdo->prepare('UPDATE payables SET due_date=?, description=?, category=?, supplier=?, total_amount=?, payment_method=?, installments=?, current_installment=?, installment_value=?, notes=?, configuration_pending=?, total_manually_changed=? WHERE id=?');
+        $statement->execute([$values['due_date'],$values['description'],$values['category'],$values['supplier'],$values['total_amount'],$values['payment_method'],$values['installments'],$values['current_installment'],$values['installment_value'],$values['notes'],$locked ? (int)$account['configuration_pending'] : 0,$manual,$accountId]);
         $pdo->commit();
     } catch (Throwable $error) { if ($pdo->inTransaction()) { $pdo->rollBack(); } throw $error; }
 }

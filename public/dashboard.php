@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../src/layout.php';
 
 require_page_access('dashboard.php');
+require_once __DIR__ . '/../src/material_rules.php';
 
 $year =
     (int)(
@@ -153,7 +154,8 @@ $payables =
             total_amount,
             installments,
             current_installment,
-            installment_value
+            installment_value,
+            configuration_pending
         FROM payables
         WHERE configuration_pending = 0 AND due_date IS NOT NULL
     ")
@@ -253,7 +255,7 @@ foreach ($payables as $payable) {
         }
 
         $expenses[(int)$projected->format('m')] +=
-            $installmentValue;
+            payable_projected_amount($payable, $currentInstallment + $offset);
     }
 }
 

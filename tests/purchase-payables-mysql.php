@@ -8,14 +8,16 @@ $database='helpdesk_purchase_integration_test';
 $pdo=new PDO('mysql:host=127.0.0.1;port=13308;charset=utf8mb4','root','',[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
 if(($argv[1]??'')==='--worker'){
     $pdo->exec('USE '.$database);$label=$argv[2]??'';
-    if(!in_array($label,['configuration','delete-paid'],true))exit(1);
+    if(!in_array($label,['configuration','delete-paid','pay-a','pay-b','repeat-a','repeat-b','reverse-a','reverse-b','payment-delete-a','payment-delete-b','cross-account-a','cross-account-b'],true))exit(1);
     $input=json_decode(file_get_contents($folder.'/'.$label.'-input.json'),true,512,JSON_THROW_ON_ERROR);
-    file_put_contents($folder.'/'.$label.'-ready','ready');$error=null;
+    file_put_contents($folder.'/'.$label.'-ready','ready');$error=null;$workerResult=null;
     try{
         if($label==='configuration')payable_update_configuration($pdo,$input['id'],$input['values'],$input['revision']);
-        else material_delete_unused($pdo,$input['material']);
+        elseif(in_array($label,['delete-paid','payment-delete-b'],true))material_delete_unused($pdo,$input['material']);
+        elseif(str_starts_with($label,'reverse-'))$workerResult=payable_reverse_payment($pdo,$input['account'],$input['payment'],$input['reason'],1);
+        else $workerResult=payable_record_payment($pdo,$input['account'],$input['values'],1);
     }catch(Throwable $e){$error=$e->getMessage();}
-    file_put_contents($folder.'/'.$label.'-result.json',json_encode(['error'=>$error],JSON_UNESCAPED_UNICODE));exit;
+    file_put_contents($folder.'/'.$label.'-result.json',json_encode(['error'=>$error,'result'=>$workerResult],JSON_UNESCAPED_UNICODE));exit;
 }
 $checks=0;$failures=[];$http=null;$child=null;
 $check=static function(bool $value,string $label)use(&$checks,&$failures){$checks++;if(!$value)$failures[]=$label;};
@@ -38,6 +40,7 @@ try{
     $check($original===$legacy&&$after['material_purchase_id']===null&&(int)$after['configuration_pending']===0,'Migracao preserva integralmente conta manual anterior');
     $afterHashes=$fingerprint($pdo);unset($before['payables'],$afterHashes['payables']);$check($before===$afterHashes,'Migracao preserva todos registros das outras quinze tabelas');
     $check((int)$pdo->query('SELECT COUNT(*) FROM payables WHERE material_purchase_id IS NOT NULL')->fetchColumn()===0,'Migracao nao cria contas retroativas');
+    $pdo->exec(file_get_contents(dirname(__DIR__).'/sql/migrations/20261105_payable_payments.sql'));
     $pdo->beginTransaction();material_lock($pdo,1);
     $pdo->exec("INSERT INTO material_purchases(id,material_id,purchase_date,quantity,total_cost,unit_cost) VALUES(2,1,'2026-11-05',2,100,50);
     INSERT INTO stock_movements(material_id,movement_type,quantity,purchase_id,created_by) VALUES(1,'entrada',2,2,1)");
@@ -95,6 +98,7 @@ try{
     $count=(int)$pdo->query('SELECT COUNT(*) FROM payables')->fetchColumn();
     $page=$request('materials.php',['csrf'=>'financial-test-csrf','action'=>'purchase','material_id'=>'1','purchase_date'=>'2026-11-06','supplier'=>'NF fictícia','quantity'=>'1','total_cost'=>'25','purchase_notes'=>'Teste HTTP']);
     $check($page['status']===302&&(int)$pdo->query('SELECT COUNT(*) FROM payables')->fetchColumn()===$count+1,'Pagina real cria compra estoque e obrigacao juntos no MariaDB');
+    require __DIR__.'/payable-payments-mysql-cases.php';
     foreach($pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $table)foreach($pdo->query('CHECK TABLE `'.$table.'`') as $result)$check($result['Msg_type']!=='error','CHECK TABLE '.$table);
     // Rehearse a complete logical restore of the migrated synthetic database.
     $dump=$folder.'/synthetic-restoration.sql';
@@ -102,7 +106,7 @@ try{
     $restore=$database.'_restored';$pdo->exec('CREATE DATABASE '.$restore);
     $process=proc_open(['C:/xampp/mysql/bin/mysql.exe','--no-defaults','--host=127.0.0.1','--port=13308','--user=root','--database='.$restore],[0=>['file',$dump,'r'],1=>['file',$folder.'/restore-out.log','a'],2=>['file',$folder.'/restore-err.log','a']],$pipes);if(proc_close($process)!==0)throw new RuntimeException('Restauracao sintetica falhou.');
     $restored=new PDO('mysql:host=127.0.0.1;port=13308;dbname='.$restore.';charset=utf8mb4','root','',[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
-    $check($fingerprint($pdo)===$fingerprint($restored),'Backup logico migrado restaura com hashes iguais nas dezesseis tabelas');
+    $check($fingerprint($pdo)===$fingerprint($restored),'Backup logico migrado restaura com hashes iguais em todas as tabelas');
     $report=['checks'=>$checks,'failures'=>$failures,'scope'=>'Esquema real sem registros reais; migracao, legado sintetico, HTTP, concorrencia de dois processos, rollback e restauracao logica. MariaDB novo na porta 13308.'];
     file_put_contents($folder.'/resultado-integracao.json',json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE));echo json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n";
     if(($argv[1]??'')==='--serve'){

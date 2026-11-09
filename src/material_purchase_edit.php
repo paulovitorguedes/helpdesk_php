@@ -19,11 +19,11 @@ function material_purchase_revision(array $purchase): string
 
 function material_purchase_edit_block(PDO $pdo, array $purchase): ?string
 {
-    $payment = $pdo->prepare('SELECT status, paid_at FROM payables WHERE material_purchase_id = ?');
+    $payment = $pdo->prepare('SELECT status, paid_at, payment_history_locked FROM payables WHERE material_purchase_id = ?');
     $payment->execute([(int)$purchase['id']]);
     $account = $payment->fetch(PDO::FETCH_ASSOC);
     if ($account && purchase_payable_paid($account)) {
-        return 'Data, quantidade e valor estão protegidos: já existe pagamento registrado na conta vinculada, mesmo que parcial.';
+        return 'Data, quantidade e valor estão protegidos: existe pagamento no histórico da conta vinculada, mesmo que parcial ou estornado.';
     }
     $statement = $pdo->prepare('SELECT id, movement_type, quantity, ticket_id FROM stock_movements WHERE purchase_id = ? ORDER BY id');
     $statement->execute([(int)$purchase['id']]);

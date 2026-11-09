@@ -476,6 +476,10 @@ $allRows = $pdo->query("
     ORDER BY p.due_date, p.id
 ")->fetchAll();
 
+$paymentSums = [];
+foreach ($pdo->query('SELECT payable_id, installment_number, SUM(amount) AS paid FROM payable_payments WHERE reversed_at IS NULL GROUP BY payable_id, installment_number')->fetchAll() as $paymentSum) {
+    $paymentSums[(int)$paymentSum['payable_id']][(int)$paymentSum['installment_number']] = payable_cents((string)$paymentSum['paid']);
+}
 $rows = [];
 $unconfiguredRows = [];
 $totalToPay = 0.0;
@@ -557,6 +561,10 @@ foreach ($allRows as $row) {
     $row['display_due_date'] =
         $displayDueDate;
 
+    $amountForMonth = payable_projected_amount($row, $displayInstallment);
+    $row['legacy_payment_review'] = (int)$row['current_installment'] !== 1 || (!(int)$row['payment_history_locked'] && ($row['status'] === 'pago' || !empty($row['paid_at'])));
+    $row['recorded_paid'] = $paymentSums[(int)$row['id']][$displayInstallment] ?? 0;
+    $row['recorded_balance'] = payable_cents((string)$amountForMonth) - $row['recorded_paid'];
     $row['amount_for_month'] =
         $amountForMonth;
 
@@ -635,6 +643,8 @@ if ($editId > 0) {
 }
 
 
+$editingLocked = $editing && purchase_payable_paid($editing);
+
 render_header(
     'Contas a Pagar'
 );
@@ -659,6 +669,10 @@ render_header(
                 <form
                     method="post"
                     id="payableForm">
+                    <?php if ($editingLocked): ?>
+                        <div class="alert alert-warning">Total, vencimentos, forma e parcelamento estão protegidos pelo histórico de pagamentos, inclusive após estorno. Descrição, fornecedor e observações continuam editáveis.</div>
+                        <input type="hidden" name="payment_method" value="<?= e($editing['payment_method']) ?>">
+                    <?php endif; ?>
                     <?php if ($editing && $editing['material_purchase_id'] !== null): ?>
                         <input type="hidden" name="linked_revision" value="<?= e(purchase_payable_revision($editing)) ?>">
                         <div class="alert alert-info">Compra de <?= e($editing['material_description']) ?> — valor da compra: <?= money($editing['purchase_total']) ?>.
@@ -698,7 +712,7 @@ render_header(
                         <input
                             class="form-control"
                             type="date"
-                            name="due_date"
+                            name="due_date" <?= $editingLocked ? 'readonly' : '' ?>
                             value="<?= e(
                                         $editing
                                             ? $editing['due_date']
@@ -761,7 +775,7 @@ render_header(
                         <input
                             class="form-control"
                             type="number"
-                            name="total_amount"
+                            name="total_amount" <?= $editingLocked ? 'readonly' : '' ?>
                             id="total_amount"
                             min="0"
                             step="0.01"
@@ -788,7 +802,7 @@ render_header(
 
                         <select
                             class="form-select"
-                            name="payment_method">
+                            name="payment_method" <?= $editingLocked ? 'disabled' : '' ?>>
 
                             <option value="" <?= $editing && $editing['payment_method'] === null ? 'selected' : '' ?>>Selecione</option>
                             <option
@@ -885,7 +899,7 @@ render_header(
                             <input
                                 class="form-control"
                                 type="number"
-                                name="installments"
+                                name="installments" <?= $editingLocked ? 'readonly' : '' ?>
                                 id="installments"
                                 value="<?= $editing ? e($editing['installments'] === null ? '' : (string)(int)$editing['installments']) : 1 ?>"
                                 min="1"
@@ -903,7 +917,7 @@ render_header(
                             <input
                                 class="form-control"
                                 type="number"
-                                name="current_installment"
+                                name="current_installment" <?= $editingLocked ? 'readonly' : '' ?>
                                 id="current_installment"
                                 value="<?= $editing ? e($editing['current_installment'] === null ? '' : (string)(int)$editing['current_installment']) : 1 ?>"
                                 min="1"
@@ -923,7 +937,7 @@ render_header(
                         <input
                             class="form-control"
                             type="number"
-                            name="installment_value"
+                            name="installment_value" <?= $editingLocked ? 'readonly' : '' ?>
                             id="installment_value"
                             min="0"
                             step="0.01"
@@ -988,7 +1002,7 @@ render_header(
                             </div>
 
 
-                            <?php if ($editing['material_purchase_id'] === null): ?>
+                            <?php if ($editing['material_purchase_id'] === null && !$editingLocked): ?>
                             <button
                                 class="btn btn-danger"
                                 type="submit"
@@ -1195,6 +1209,7 @@ render_header(
                             <th>Valor total</th>
                             <th>Valor parcela</th>
                             <th>Parcela</th>
+                            <th>Pagamentos</th>
                             <th>Ações</th>
 
                         </tr>
@@ -1261,6 +1276,15 @@ render_header(
                                 </td>
 
 
+                                <td>
+                                    <?php if ($r['legacy_payment_review']): ?>
+                                        <span class="text-warning-emphasis">Revisar histórico</span>
+                                    <?php else: ?>
+                                        <div>Pago: <?= money(payable_decimal($r['recorded_paid'])) ?></div>
+                                        <div>Saldo: <?= money(payable_decimal($r['recorded_balance'])) ?></div>
+                                        <small><?= $r['amount_for_month'] == 0 ? 'Sem valor' : ($r['recorded_balance'] === 0 ? 'Quitada' : ($r['recorded_paid'] > 0 ? 'Parcial' : 'Em aberto')) ?></small>
+                                    <?php endif; ?>
+                                </td>
                                 <td class="text-nowrap">
 
                                     <a
@@ -1276,6 +1300,7 @@ render_header(
                                                 ) ?>">
                                         Editar
                                     </a>
+                                    <a class="btn btn-sm btn-outline-success" href="<?= e(base_url('payable-payments.php?id=' . (int)$r['id'])) ?>">Pagamentos</a>
 
                                 </td>
 
@@ -1289,7 +1314,7 @@ render_header(
                             <tr>
 
                                 <td
-                                    colspan="8"
+                                    colspan="9"
                                     class="text-center text-muted py-4">
                                     Nenhuma conta a pagar encontrada para
                                     <?= e(
@@ -1313,9 +1338,9 @@ render_header(
                         <tr class="table-light fw-bold">
 
                             <td
-                                colspan="6"
+                                colspan="7"
                                 class="text-end">
-                                Total a pagar em
+                                Total previsto em
                                 <?= e(
                                     payable_month_name(
                                         $selectedMonth
