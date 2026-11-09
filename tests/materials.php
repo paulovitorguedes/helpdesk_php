@@ -48,6 +48,7 @@ INSERT INTO ticket_materials(ticket_id,material_id,description,quantity,unit_pri
 CREATE TRIGGER fail_stock BEFORE INSERT ON stock_movements WHEN NEW.notes='falha simulada' BEGIN SELECT RAISE(ABORT,'Falha simulada ao gravar movimento'); END;
 SQL;
 $pdo->exec($schema);
+$pdo->exec("ALTER TABLE receivables ADD client_id INTEGER; ALTER TABLE receivables ADD competence TEXT; ALTER TABLE receivables ADD closed_at TEXT; UPDATE receivables SET client_id=1,competence='2026-10'");
 $financialBefore=json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables WHERE material_purchase_id IS NULL')->fetchAll()]);
 session_save_path($root.'/sessions');
 $cookies=[];

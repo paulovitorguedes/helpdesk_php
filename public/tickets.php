@@ -2,6 +2,7 @@
 
 require_once __DIR__ . '/../src/layout.php';
 require_once __DIR__ . '/../src/material_rules.php';
+require_once __DIR__ . '/../src/ticket_billing_integrity.php';
 
 require_page_access('tickets.php');
 
@@ -556,6 +557,8 @@ function saveBillingSchedule(
     string $chargeType,
     array $newSchedule
 ): void {
+
+    detach_mismatched_ticket_billing($pdo, $ticketId, $chargeType);
 
     $stmt = $pdo->prepare("
         SELECT
@@ -2189,6 +2192,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             );
 
 
+            assert_ticket_billing_ownership($pdo, $ticketId);
             $pdo->commit();
 
 
@@ -2894,6 +2898,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         );
 
 
+        assert_ticket_billing_ownership($pdo, $id);
         $pdo->commit();
 
 
