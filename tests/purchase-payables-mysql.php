@@ -3,6 +3,8 @@ declare(strict_types=1);
 if(PHP_SAPI!=='cli'||getenv('HELPDESK_MATERIAL_MYSQL_TEST_PORT')!=='13308')exit(1);
 require_once dirname(__DIR__).'/src/material_rules.php';
 require_once dirname(__DIR__).'/src/material_purchase_edit.php';
+require_once dirname(__DIR__).'/src/material_invoices.php';
+date_default_timezone_set('America/Sao_Paulo');
 $folder=getenv('HELPDESK_MATERIAL_MYSQL_TEST_FOLDER');if(!$folder||!is_dir($folder))exit(1);
 $database='helpdesk_purchase_integration_test';
 $pdo=new PDO('mysql:host=127.0.0.1;port=13308;charset=utf8mb4','root','',[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
@@ -23,7 +25,7 @@ $checks=0;$failures=[];$http=null;$child=null;
 $check=static function(bool $value,string $label)use(&$checks,&$failures){$checks++;if(!$value)$failures[]=$label;};
 $fingerprint=static function(PDO $connection):array{
     $result=[];foreach($connection->query('SHOW FULL TABLES')->fetchAll(PDO::FETCH_NUM) as $table){if($table[1]!=='BASE TABLE')continue;
-        $rows=$connection->query('SELECT * FROM `'.$table[0].'` ORDER BY 1')->fetchAll();$result[$table[0]]=hash('sha256',json_encode($rows,JSON_THROW_ON_ERROR));}
+        $rows=$connection->query('SELECT * FROM `'.$table[0].'` ORDER BY 1')->fetchAll();$result[$table[0]]=hash('sha256',serialize($rows));}
     return $result;
 };
 try{
@@ -41,6 +43,11 @@ try{
     $afterHashes=$fingerprint($pdo);unset($before['payables'],$afterHashes['payables']);$check($before===$afterHashes,'Migracao preserva todos registros das outras quinze tabelas');
     $check((int)$pdo->query('SELECT COUNT(*) FROM payables WHERE material_purchase_id IS NOT NULL')->fetchColumn()===0,'Migracao nao cria contas retroativas');
     $pdo->exec(file_get_contents(dirname(__DIR__).'/sql/migrations/20261105_payable_payments.sql'));
+    $nfBefore=$fingerprint($pdo);
+    $pdo->exec(file_get_contents(dirname(__DIR__).'/sql/migrations/20261109_material_invoices.sql'));
+    $nfAfter=$fingerprint($pdo);unset($nfAfter['material_purchase_invoices'],$nfAfter['material_purchase_invoice_parts']);
+    $check($nfBefore===$nfAfter,'Migracao NF preserva todas as tabelas existentes');
+    $check((int)$pdo->query('SELECT @@max_allowed_packet')->fetchColumn()===1048576,'Teste usa limite de pacote igual a producao: 1 MB');
     $pdo->beginTransaction();material_lock($pdo,1);
     $pdo->exec("INSERT INTO material_purchases(id,material_id,purchase_date,quantity,total_cost,unit_cost) VALUES(2,1,'2026-11-05',2,100,50);
     INSERT INTO stock_movements(material_id,movement_type,quantity,purchase_id,created_by) VALUES(1,'entrada',2,2,1)");
@@ -99,10 +106,11 @@ try{
     $page=$request('materials.php',['csrf'=>'financial-test-csrf','action'=>'purchase','material_id'=>'1','purchase_date'=>'2026-11-06','supplier'=>'NF fictícia','quantity'=>'1','total_cost'=>'25','purchase_notes'=>'Teste HTTP']);
     $check($page['status']===302&&(int)$pdo->query('SELECT COUNT(*) FROM payables')->fetchColumn()===$count+1,'Pagina real cria compra estoque e obrigacao juntos no MariaDB');
     require __DIR__.'/payable-payments-mysql-cases.php';
+    require __DIR__.'/material-invoices-mysql-cases.php';
     foreach($pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $table)foreach($pdo->query('CHECK TABLE `'.$table.'`') as $result)$check($result['Msg_type']!=='error','CHECK TABLE '.$table);
     // Rehearse a complete logical restore of the migrated synthetic database.
     $dump=$folder.'/synthetic-restoration.sql';
-    $process=proc_open(['C:/xampp/mysql/bin/mysqldump.exe','--no-defaults','--host=127.0.0.1','--port=13308','--user=root','--single-transaction','--result-file='.$dump,$database],[0=>['pipe','r'],1=>['file',$folder.'/dump-out.log','a'],2=>['file',$folder.'/dump-err.log','a']],$pipes);fclose($pipes[0]);if(proc_close($process)!==0)throw new RuntimeException('Dump sintetico falhou.');
+    $process=proc_open(['C:/xampp/mysql/bin/mysqldump.exe','--no-defaults','--host=127.0.0.1','--port=13308','--user=root','--single-transaction','--hex-blob','--skip-extended-insert','--result-file='.$dump,$database],[0=>['pipe','r'],1=>['file',$folder.'/dump-out.log','a'],2=>['file',$folder.'/dump-err.log','a']],$pipes);fclose($pipes[0]);if(proc_close($process)!==0)throw new RuntimeException('Dump sintetico falhou.');
     $restore=$database.'_restored';$pdo->exec('CREATE DATABASE '.$restore);
     $process=proc_open(['C:/xampp/mysql/bin/mysql.exe','--no-defaults','--host=127.0.0.1','--port=13308','--user=root','--database='.$restore],[0=>['file',$dump,'r'],1=>['file',$folder.'/restore-out.log','a'],2=>['file',$folder.'/restore-err.log','a']],$pipes);if(proc_close($process)!==0)throw new RuntimeException('Restauracao sintetica falhou.');
     $restored=new PDO('mysql:host=127.0.0.1;port=13308;dbname='.$restore.';charset=utf8mb4','root','',[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);

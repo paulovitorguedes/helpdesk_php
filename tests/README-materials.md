@@ -17,3 +17,5 @@ Atualizacao: edicao da ultima compra agora e coberta por `materials-purchase-edi
 Exclusao sem sair do formulario: a suite testa resposta JSON 409 sem Location/flash adicional quando bloqueada, invariantes dos dados, sucesso JSON pelo Financeiro e CSRF 419 preservado. O caminho HTML tradicional permanece disponivel como fallback. A confirmacao existente continua exigida antes do envio pelo navegador.
 
 Previa visual: `php tests/materials.php --serve` inicia somente ambiente ficticio por ate 30 minutos e informa URL/arquivo de parada. A rota de login sintetico so existe no roteador de teste quando a variavel exclusiva de preview esta ativa. Nao e instalada em public nem usada no banco real.
+
+Atualizacao 09/11/2026: integracao de compras e pagamentos ja implementada. NF por compra e data atual como padrao de nova compra cobertas pela suite atual (263 verificacoes). Ver README-material-invoices.md para armazenamento, backup, limites e testes MariaDB. Os paragrafos anteriores registram o escopo historico de entregas anteriores.

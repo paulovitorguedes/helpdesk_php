@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../src/layout.php';
 require_once __DIR__ . '/../src/material_rules.php';
 require_once __DIR__ . '/../src/material_purchase_edit.php';
+require_once __DIR__ . '/../src/material_invoices.php';
 
 require_page_access('materials.php');
 
@@ -116,6 +117,7 @@ if (isset($_GET['purchase'])) {
 
 $historyMaterial = null;
 $purchaseHistory = [];
+$invoiceHistory = [];
 $movementHistory = [];
 
 if (isset($_GET['history'])) {
@@ -172,6 +174,7 @@ if (isset($_GET['history'])) {
     $stmt->execute([$historyId]);
 
     $purchaseHistory = $stmt->fetchAll();
+    $invoiceHistory = material_invoice_history($pdo, $historyId);
 
 
     /*
@@ -272,7 +275,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             redirect(base_url('materials.php?purchase=' . $materialId));
         };
         try {
-            $purchaseDate = material_purchase_date($_POST['purchase_date'] ?? '');
+            $purchaseDate = material_new_purchase_date($_POST['purchase_date'] ?? '');
             $quantity = material_whole_quantity($_POST['quantity'] ?? '', 'A quantidade comprada');
         } catch (InvalidArgumentException $error) {
             $rejectPurchase($error->getMessage());
@@ -516,7 +519,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         trim($_POST['supplier'] ?? '');
 
     try {
-        $purchaseDate = material_purchase_date($purchaseDate);
+        $purchaseDate = material_new_purchase_date($purchaseDate);
         $quantity = material_whole_quantity($_POST['quantity'] ?? '', 'A quantidade comprada');
     } catch (InvalidArgumentException $error) {
         flash('danger', $error->getMessage());
@@ -851,6 +854,7 @@ render_header('Materiais');
                                     <th>Qtd</th>
                                     <th>Total</th>
                                     <th>Unitário</th>
+                                    <th>NF em PDF</th>
                                 </tr>
 
                             </thead>
@@ -861,7 +865,7 @@ render_header('Materiais');
 
                                     <tr>
 
-                                        <td colspan="4">
+                                        <td colspan="5">
                                             Nenhuma compra registrada.
                                         </td>
 
@@ -890,6 +894,24 @@ render_header('Materiais');
 
                                             <td>
                                                 <?= money($purchase['unit_cost']) ?>
+                                            </td>
+                                            <td style="min-width:14rem">
+                                                <form method="post" enctype="multipart/form-data" action="<?= e(base_url('material-invoice.php')) ?>" data-invoice-upload>
+                                                    <input type="hidden" name="csrf" value="<?= e(csrf_token()) ?>">
+                                                    <input type="hidden" name="purchase_id" value="<?= (int)$purchase['id'] ?>">
+                                                    <input type="hidden" name="request_token" value="<?= bin2hex(random_bytes(32)) ?>">
+                                                    <label class="form-label small" for="invoice-file-<?= (int)$purchase['id'] ?>">Anexar NF (até 10 MB)</label>
+                                                    <input type="file" id="invoice-file-<?= (int)$purchase['id'] ?>" class="form-control form-control-sm mb-1" name="invoice_pdf" accept=".pdf,application/pdf" required>
+                                                    <button type="submit" class="btn btn-sm btn-outline-primary">Enviar PDF</button>
+                                                    <div class="alert alert-warning small mt-2 mb-0" role="alert" data-invoice-feedback hidden></div>
+                                                </form>
+                                                <?php foreach ($invoiceHistory[(int)$purchase['id']] ?? [] as $invoice): ?>
+                                                    <div class="border-top mt-2 pt-2 small">
+                                                        <a href="<?= e(base_url('material-invoice.php?id=' . $invoice['id'])) ?>" target="_blank" rel="noopener"><?= e($invoice['original_name']) ?></a>
+                                                        <a class="ms-1" href="<?= e(base_url('material-invoice.php?id=' . $invoice['id'] . '&download=1')) ?>">Baixar</a>
+                                                        <div><?= e(date('d/m/Y H:i', strtotime($invoice['created_at']))) ?> · <?= e($invoice['author']) ?></div>
+                                                    </div>
+                                                <?php endforeach; ?>
                                             </td>
 
                                         </tr>
@@ -1087,8 +1109,7 @@ render_header('Materiais');
                                 class="form-control"
                                 type="date"
                                 name="purchase_date"
-                                value="<?= date('Y-m-d') ?>"
-                                required>
+                                value="<?= date('Y-m-d') ?>">
 
                         </div>
 
@@ -1348,8 +1369,7 @@ render_header('Materiais');
                                     class="form-control"
                                     type="date"
                                     name="purchase_date"
-                                    value="<?= date('Y-m-d') ?>"
-                                    required>
+                                    value="<?= date('Y-m-d') ?>">
 
                             </div>
 
@@ -1840,4 +1860,5 @@ render_header('Materiais');
 <script src="<?= e(base_url('assets/js/materials-delete.js') . '?v=' . filemtime(__DIR__ . '/assets/js/materials-delete.js')) ?>"></script>
 <script src="<?= e(base_url('assets/js/materials-purchase.js') . '?v=' . filemtime(__DIR__ . '/assets/js/materials-purchase.js')) ?>"></script>
 <script src="<?= e(base_url('assets/js/materials-actions.js') . '?v=' . filemtime(__DIR__ . '/assets/js/materials-actions.js')) ?>"></script>
+<script src="<?= e(base_url('assets/js/material-invoices.js') . '?v=' . filemtime(__DIR__ . '/assets/js/material-invoices.js')) ?>"></script>
 <?php render_footer(); ?>

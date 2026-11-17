@@ -30,6 +30,12 @@ function material_whole_quantity(mixed $value, string $label, bool $allowZero = 
     return $quantity;
 }
 
+function material_new_purchase_date(mixed $value): string
+{
+    if ($value === null || (is_string($value) && trim($value) === '')) { $value = date('Y-m-d'); }
+    return material_purchase_date($value);
+}
+
 function material_purchase_date(mixed $value): string
 {
     if (!is_string($value) || !preg_match('/^([0-9]{4})-([0-9]{2})-([0-9]{2})$/D', $value, $parts)

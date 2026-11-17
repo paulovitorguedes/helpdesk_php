@@ -3,6 +3,8 @@ declare(strict_types=1);
 if (PHP_SAPI !== 'cli') { http_response_code(404); exit; }
 require_once dirname(__DIR__) . '/src/material_rules.php';
 require_once dirname(__DIR__) . '/src/material_purchase_edit.php';
+require_once dirname(__DIR__) . '/src/material_invoices.php';
+date_default_timezone_set('America/Sao_Paulo');
 $application=dirname(__DIR__);
 $root=sys_get_temp_dir().'/helpdesk-materials-'.bin2hex(random_bytes(8));
 foreach(['source/src','source/public/assets/js','source/public/assets/css','source/config','sessions','evidencias'] as $folder) {
@@ -48,6 +50,12 @@ INSERT INTO ticket_materials(ticket_id,material_id,description,quantity,unit_pri
 CREATE TRIGGER fail_stock BEFORE INSERT ON stock_movements WHEN NEW.notes='falha simulada' BEGIN SELECT RAISE(ABORT,'Falha simulada ao gravar movimento'); END;
 SQL;
 $pdo->exec($schema);
+$pdo->exec(<<<'INVOICE_SQL'
+CREATE TABLE material_purchase_invoices(id INTEGER PRIMARY KEY AUTOINCREMENT,material_purchase_id INTEGER NOT NULL REFERENCES material_purchases(id) ON DELETE CASCADE,original_name TEXT NOT NULL,size_bytes INTEGER NOT NULL,sha256 TEXT NOT NULL,request_token TEXT UNIQUE NOT NULL,uploaded_by INTEGER NOT NULL REFERENCES users(id),created_at TEXT DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE material_purchase_invoice_parts(invoice_id INTEGER NOT NULL REFERENCES material_purchase_invoices(id) ON DELETE CASCADE,part_number INTEGER NOT NULL,pdf_bytes BLOB NOT NULL,PRIMARY KEY(invoice_id,part_number));
+INVOICE_SQL
+);
+
 $pdo->exec("ALTER TABLE receivables ADD client_id INTEGER; ALTER TABLE receivables ADD competence TEXT; ALTER TABLE receivables ADD closed_at TEXT; UPDATE receivables SET client_id=1,competence='2026-10'");
 $financialBefore=json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables WHERE material_purchase_id IS NULL')->fetchAll()]);
 session_save_path($root.'/sessions');
@@ -179,6 +187,7 @@ try {
     require __DIR__ . '/materials-purchase-feedback-cases.php';
     require __DIR__ . '/purchase-payables-cases.php';
     require __DIR__ . '/payable-payments-cases.php';
+    require __DIR__ . '/material-invoice-cases.php';
     $report=['checks'=>$checks,'failures'=>$failures,'test_directory'=>$root,'scope'=>'Paginas reais via HTTP; SQLite sintetico; sem configuracao ou banco reais. FOR UPDATE removido somente pelo adaptador SQLite de teste; concorrencia MariaDB nao validada por esta suite.'];
     $evidence=$argv[1]??($root.'/evidencias');if(!is_dir($evidence))throw new RuntimeException('Pasta de evidencia inexistente.');
     file_put_contents($evidence.'/resultado-materiais.json',json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n");
