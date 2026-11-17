@@ -84,6 +84,9 @@ try{
     foreach(['source/src','source/public/assets/js','source/public/assets/css','source/config','sessions'] as $dir)mkdir($folder.'/'.$dir,0700,true);
     foreach(['src','public'] as $dir)foreach(glob(dirname(__DIR__).'/'.$dir.'/*.php') as $file)copy($file,$folder.'/source/'.$dir.'/'.basename($file));
     foreach(['js','css'] as $kind)foreach(glob(dirname(__DIR__).'/public/assets/'.$kind.'/*') as $file)if(is_file($file))copy($file,$folder.'/source/public/assets/'.$kind.'/'.basename($file));
+    $guardPath=$folder.'/source/src/ticket_monthly_lock.php';$guard=file_get_contents($guardPath);
+    $guard=str_replace("return new DateTimeImmutable('today');","return new DateTimeImmutable('2026-10-21');",$guard,$clockChanges);
+    if($clockChanges!==1)throw new RuntimeException('Relogio de teste nao isolado.');file_put_contents($guardPath,$guard);
     file_put_contents($folder.'/source/config/config.php',"<?php return ".var_export(['app_name'=>'Integração fictícia','base_url'=>'','db'=>['host'=>'127.0.0.1','port'=>13308,'name'=>$database,'charset'=>'utf8mb4','user'=>'root','pass'=>'']],true).';');
     session_save_path($folder.'/sessions');$cookies=[];
     foreach(['admin','financeiro','tecnico'] as $role){$id='financialtest'.bin2hex(random_bytes(10));session_id($id);session_start();$_SESSION=['user'=>['id'=>1,'name'=>'Pessoa fictícia','role'=>$role],'csrf'=>'financial-test-csrf'];session_write_close();$cookies[$role]='PHPSESSID='.$id;}
@@ -107,10 +110,11 @@ try{
     $check($page['status']===302&&(int)$pdo->query('SELECT COUNT(*) FROM payables')->fetchColumn()===$count+1,'Pagina real cria compra estoque e obrigacao juntos no MariaDB');
     require __DIR__.'/payable-payments-mysql-cases.php';
     require __DIR__.'/material-invoices-mysql-cases.php';
+    require __DIR__.'/ticket-monthly-mysql-cases.php';
     foreach($pdo->query('SHOW TABLES')->fetchAll(PDO::FETCH_COLUMN) as $table)foreach($pdo->query('CHECK TABLE `'.$table.'`') as $result)$check($result['Msg_type']!=='error','CHECK TABLE '.$table);
     // Rehearse a complete logical restore of the migrated synthetic database.
     $dump=$folder.'/synthetic-restoration.sql';
-    $process=proc_open(['C:/xampp/mysql/bin/mysqldump.exe','--no-defaults','--host=127.0.0.1','--port=13308','--user=root','--single-transaction','--hex-blob','--skip-extended-insert','--result-file='.$dump,$database],[0=>['pipe','r'],1=>['file',$folder.'/dump-out.log','a'],2=>['file',$folder.'/dump-err.log','a']],$pipes);fclose($pipes[0]);if(proc_close($process)!==0)throw new RuntimeException('Dump sintetico falhou.');
+    $process=proc_open(['C:/xampp/mysql/bin/mysqldump.exe','--no-defaults','--host=127.0.0.1','--port=13308','--user=root','--single-transaction','--hex-blob','--result-file='.$dump,$database],[0=>['pipe','r'],1=>['file',$folder.'/dump-out.log','a'],2=>['file',$folder.'/dump-err.log','a']],$pipes);fclose($pipes[0]);if(proc_close($process)!==0)throw new RuntimeException('Dump sintetico falhou.');
     $restore=$database.'_restored';$pdo->exec('CREATE DATABASE '.$restore);
     $process=proc_open(['C:/xampp/mysql/bin/mysql.exe','--no-defaults','--host=127.0.0.1','--port=13308','--user=root','--database='.$restore],[0=>['file',$dump,'r'],1=>['file',$folder.'/restore-out.log','a'],2=>['file',$folder.'/restore-err.log','a']],$pipes);if(proc_close($process)!==0)throw new RuntimeException('Restauracao sintetica falhou.');
     $restored=new PDO('mysql:host=127.0.0.1;port=13308;dbname='.$restore.';charset=utf8mb4','root','',[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);

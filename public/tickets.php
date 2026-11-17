@@ -3,6 +3,7 @@
 require_once __DIR__ . '/../src/layout.php';
 require_once __DIR__ . '/../src/material_rules.php';
 require_once __DIR__ . '/../src/ticket_billing_integrity.php';
+require_once __DIR__ . '/../src/ticket_monthly_lock.php';
 
 require_page_access('tickets.php');
 
@@ -995,6 +996,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             : ''
         );
 
+
+    // Locked calls accept only the three authorized text fields, even with other POST fields omitted or tampered.
+    if ($id > 0) {
+        try {
+            $pdo->beginTransaction();
+            $monthlyReason = ticket_monthly_lock_reason($pdo, $id, null, true);
+            if ($monthlyReason !== null || ticket_locked($pdo, $id)) {
+                ticket_save_locked_text($pdo, $id, $_POST);
+                $pdo->commit();
+                flash('warning', $monthlyReason ?? 'Chamado bloqueado por recebimento. Somente Reclamante, Solicitação e Solução aplicada foram considerados.');
+                redirect($returnListUrl);
+            }
+            $pdo->rollBack();
+        } catch (Throwable $error) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            flash('danger', $error->getMessage());
+            redirect(base_url('tickets.php?edit=' . $id));
+        }
+    }
 
     $client =
         (int)(
@@ -2244,6 +2264,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             );
         }
 
+
+        $monthlyReason = ticket_monthly_lock_reason($pdo, $id, null, true);
+        if ($monthlyReason !== null || ticket_locked($pdo, $id)) {
+            ticket_save_locked_text($pdo, $id, $_POST);
+            $pdo->commit();
+            flash('warning', $monthlyReason ?? 'Chamado bloqueado por recebimento. Somente os três campos textuais foram considerados.');
+            redirect($returnListUrl);
+        }
 
         $ticketNumber =
             $oldTicket['ticket_number'];
@@ -3572,6 +3600,11 @@ if (
 }
 
 
+$ticketEditLockReason = $editTicket ? ticket_monthly_lock_reason($pdo, (int)$editTicket['id']) : null;
+if ($editTicket && $ticketEditLockReason === null && ticket_locked($pdo, (int)$editTicket['id'])) {
+    $ticketEditLockReason = 'Chamado bloqueado por recebimento. Somente Reclamante, Solicitação e Solução aplicada podem ser alterados.';
+}
+
 render_header(
     'Chamados'
 );
@@ -3617,7 +3650,10 @@ render_header(
                 </h5>
 
 
-                <form method="post">
+                <?php if ($ticketEditLockReason !== null): ?>
+                    <div class="alert alert-warning" role="alert"><?= e($ticketEditLockReason) ?></div>
+                <?php endif; ?>
+                <form method="post"<?= $ticketEditLockReason !== null ? ' data-ticket-edit-locked' : '' ?>>
 
 
                     <input
@@ -5835,4 +5871,5 @@ render_header(
 </script>
 
 
+<script src="<?= e(base_url('assets/js/ticket-edit-lock.js') . '?v=' . filemtime(__DIR__ . '/assets/js/ticket-edit-lock.js')) ?>"></script>
 <?php render_footer(); ?>

@@ -22,6 +22,11 @@ $bootstrap=file_get_contents($root.'/source/src/bootstrap.php');
 $bootstrap=preg_replace_callback('/^function db\(\): PDO\r?\n\{.*?^\}/ms',static fn()=> 'function db(): PDO { static $pdo=null; return $pdo ??= new MaterialTestPDO(); }',$bootstrap,1,$replacements);
 if($replacements!==1) throw new RuntimeException('Falha ao isolar banco; abortando.');
 file_put_contents($root.'/source/src/bootstrap.php',$bootstrap);
+$guardPath=$root.'/source/src/ticket_monthly_lock.php';
+$guard=file_get_contents($guardPath);
+$guard=str_replace("return new DateTimeImmutable('today');","return new DateTimeImmutable('2026-10-21');",$guard,$clockReplacements);
+if($clockReplacements!==1)throw new RuntimeException('Nao foi possivel isolar o relogio dos testes.');
+file_put_contents($guardPath,$guard);
 $database=$root.'/materials.sqlite';
 $pdo=new PDO('sqlite:'.$database,null,null,[PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION,PDO::ATTR_DEFAULT_FETCH_MODE=>PDO::FETCH_ASSOC]);
 $pdo->exec('PRAGMA foreign_keys=ON');
@@ -57,6 +62,7 @@ INVOICE_SQL
 );
 
 $pdo->exec("ALTER TABLE receivables ADD client_id INTEGER; ALTER TABLE receivables ADD competence TEXT; ALTER TABLE receivables ADD closed_at TEXT; UPDATE receivables SET client_id=1,competence='2026-10'");
+$pdo->exec("ALTER TABLE receivables ADD due_date TEXT; ALTER TABLE receivables ADD cycle_start TEXT; ALTER TABLE receivables ADD cycle_end TEXT; UPDATE receivables SET cycle_start='2026-10-01',cycle_end='2026-10-31'");
 $financialBefore=json_encode([$pdo->query('SELECT * FROM receivables')->fetchAll(),$pdo->query('SELECT * FROM payables WHERE material_purchase_id IS NULL')->fetchAll()]);
 session_save_path($root.'/sessions');
 $cookies=[];
@@ -188,6 +194,7 @@ try {
     require __DIR__ . '/purchase-payables-cases.php';
     require __DIR__ . '/payable-payments-cases.php';
     require __DIR__ . '/material-invoice-cases.php';
+    require __DIR__ . '/ticket-monthly-lock-cases.php';
     $report=['checks'=>$checks,'failures'=>$failures,'test_directory'=>$root,'scope'=>'Paginas reais via HTTP; SQLite sintetico; sem configuracao ou banco reais. FOR UPDATE removido somente pelo adaptador SQLite de teste; concorrencia MariaDB nao validada por esta suite.'];
     $evidence=$argv[1]??($root.'/evidencias');if(!is_dir($evidence))throw new RuntimeException('Pasta de evidencia inexistente.');
     file_put_contents($evidence.'/resultado-materiais.json',json_encode($report,JSON_PRETTY_PRINT|JSON_UNESCAPED_UNICODE)."\n");
